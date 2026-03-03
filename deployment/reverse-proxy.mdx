@@ -1,0 +1,348 @@
+---
+title: Reverse proxy configuration
+description: Configure Caddy or Nginx to terminate TLS and proxy requests to Email Tracker
+---
+
+A reverse proxy sits between the internet and your Email Tracker Node.js server, handling TLS termination and forwarding requests.
+
+## Architecture
+
+```
+Internet → Reverse Proxy (Port 443) → Node.js Server (Port 8090)
+           [TLS termination]           [HTTP]
+```
+
+The reverse proxy:
+- Listens on ports 80 (HTTP) and 443 (HTTPS)
+- Obtains and manages SSL/TLS certificates
+- Terminates HTTPS connections
+- Forwards requests to the Node.js server on localhost
+
+## Configuration examples
+
+Both configurations below are production-ready and come from the Email Tracker repository.
+
+<Tabs>
+  <Tab title="Caddy">
+    Caddy automatically obtains and renews Let's Encrypt certificates. This is the simplest option.
+
+    ### Install Caddy
+
+    <CodeGroup>
+    ```bash Ubuntu/Debian
+    sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+    sudo apt update
+    sudo apt install caddy
+    ```
+
+    ```bash macOS
+    brew install caddy
+    ```
+
+    ```bash Other
+    # See https://caddyserver.com/docs/install
+    ```
+    </CodeGroup>
+
+    ### Caddyfile configuration
+
+    Create or edit `/etc/caddy/Caddyfile`:
+
+    ```caddy
+    email-tracker.duckdns.org {
+      encode gzip
+
+      reverse_proxy 127.0.0.1:8090
+    }
+    ```
+
+    Replace `email-tracker.duckdns.org` with your domain.
+
+    ### Start Caddy
+
+    ```bash
+    sudo systemctl enable caddy
+    sudo systemctl start caddy
+    ```
+
+    Caddy will automatically:
+    - Obtain a Let's Encrypt certificate for your domain
+    - Redirect HTTP to HTTPS
+    - Renew certificates before expiration
+    - Proxy requests to your Node.js server
+
+    ### Verify configuration
+
+    Check Caddy status:
+
+    ```bash
+    sudo systemctl status caddy
+    ```
+
+    Test the configuration:
+
+    ```bash
+    curl https://your-domain.com/health
+    ```
+  </Tab>
+  <Tab title="Nginx">
+    Nginx requires manual certificate setup with Certbot but offers more configuration flexibility.
+
+    ### Install Nginx
+
+    <CodeGroup>
+    ```bash Ubuntu/Debian
+    sudo apt update
+    sudo apt install nginx
+    ```
+
+    ```bash RHEL/CentOS
+    sudo yum install nginx
+    ```
+
+    ```bash macOS
+    brew install nginx
+    ```
+    </CodeGroup>
+
+    ### Nginx configuration
+
+    Create `/etc/nginx/sites-available/email-tracker`:
+
+    ```nginx
+    server {
+        listen 80;
+        server_name email-tracker.duckdns.org;
+        return 301 https://$host$request_uri;
+    }
+
+    server {
+        listen 443 ssl http2;
+        server_name email-tracker.duckdns.org;
+
+        # Set your cert paths (Let's Encrypt or other CA)
+        ssl_certificate     /etc/letsencrypt/live/email-tracker.duckdns.org/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/email-tracker.duckdns.org/privkey.pem;
+
+        location / {
+            proxy_pass http://127.0.0.1:8090;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+    ```
+
+    Replace `email-tracker.duckdns.org` with your domain.
+
+    ### Enable the site
+
+    ```bash
+    sudo ln -s /etc/nginx/sites-available/email-tracker /etc/nginx/sites-enabled/
+    sudo nginx -t  # Test configuration
+    ```
+
+    ### Obtain SSL certificate
+
+    Install Certbot:
+
+    ```bash
+    sudo apt install certbot python3-certbot-nginx
+    ```
+
+    Obtain certificate and configure Nginx:
+
+    ```bash
+    sudo certbot --nginx -d your-domain.com
+    ```
+
+    Certbot will update your Nginx configuration with the correct certificate paths.
+
+    ### Start Nginx
+
+    ```bash
+    sudo systemctl enable nginx
+    sudo systemctl start nginx
+    ```
+
+    ### Verify configuration
+
+    Check Nginx status:
+
+    ```bash
+    sudo systemctl status nginx
+    ```
+
+    Test the configuration:
+
+    ```bash
+    curl https://your-domain.com/health
+    ```
+  </Tab>
+</Tabs>
+
+## Configuration details
+
+### Port forwarding
+
+Both configurations:
+- Listen on port 443 for HTTPS traffic
+- Forward requests to `127.0.0.1:8090` (your Node.js server)
+- The Node.js server only needs to listen on localhost
+
+<Warning>
+  Never expose the Node.js server directly to the internet. Always use a reverse proxy for TLS termination and security.
+</Warning>
+
+### HTTP to HTTPS redirect
+
+- **Caddy**: Automatic redirect from HTTP to HTTPS
+- **Nginx**: Explicit `return 301` in the port 80 server block
+
+This ensures all traffic uses HTTPS, which is required for email tracking.
+
+### Compression
+
+- **Caddy**: `encode gzip` compresses responses
+- **Nginx**: Add `gzip on;` to enable compression (optional)
+
+Compression reduces bandwidth usage for dashboard pages.
+
+### Headers forwarded to Node.js
+
+The Nginx configuration forwards important headers:
+
+- `Host`: Original domain name
+- `X-Real-IP`: Client's IP address
+- `X-Forwarded-For`: Full proxy chain
+- `X-Forwarded-Proto`: Original protocol (https)
+
+These headers allow the Node.js server to see the client's real IP address and know the request came via HTTPS.
+
+## Testing your setup
+
+### 1. Check TLS certificate
+
+```bash
+openssl s_client -connect your-domain.com:443 -servername your-domain.com
+```
+
+Verify:
+- Certificate is valid
+- Issuer is Let's Encrypt (or your CA)
+- Not expired
+
+### 2. Test HTTP redirect
+
+```bash
+curl -I http://your-domain.com/health
+```
+
+Should return `301 Moved Permanently` with `Location: https://...`
+
+### 3. Test HTTPS endpoint
+
+```bash
+curl https://your-domain.com/health
+```
+
+Should return `{"status":"ok"}`
+
+### 4. Test tracking pixel
+
+```bash
+curl -I https://your-domain.com/t/test.gif
+```
+
+Should return `200 OK` with `content-type: image/gif`
+
+## Troubleshooting
+
+### Certificate errors
+
+**Problem**: Browser shows "Your connection is not private"
+
+**Solutions**:
+- Verify DNS points to correct server
+- Check certificate was obtained for correct domain
+- Ensure certificate files exist at specified paths
+- Restart reverse proxy service
+
+### 502 Bad Gateway
+
+**Problem**: Nginx/Caddy returns 502 error
+
+**Solutions**:
+- Verify Node.js server is running: `curl http://127.0.0.1:8090/health`
+- Check port number matches in reverse proxy config and Node.js
+- Review reverse proxy error logs
+- Ensure no firewall blocking localhost connections
+
+### Certificate renewal fails
+
+**Problem**: Let's Encrypt certificate expires
+
+**Solutions**:
+- Ensure ports 80 and 443 are accessible from internet
+- Check DNS points to correct server
+- Review Certbot/Caddy logs for renewal errors
+- Manually renew: `sudo certbot renew` (Nginx) or `sudo systemctl restart caddy` (Caddy)
+
+## Advanced configuration
+
+### Rate limiting
+
+Protect your server from abuse:
+
+<Tabs>
+  <Tab title="Caddy">
+    ```caddy
+    email-tracker.duckdns.org {
+      encode gzip
+
+      # Rate limit: 10 requests per second per IP
+      rate_limit {
+        zone static 10r/s
+      }
+
+      reverse_proxy 127.0.0.1:8090
+    }
+    ```
+  </Tab>
+  <Tab title="Nginx">
+    ```nginx
+    # Add to http block
+    limit_req_zone $binary_remote_addr zone=tracker:10m rate=10r/s;
+
+    # Add to location block
+    location / {
+        limit_req zone=tracker burst=20 nodelay;
+        proxy_pass http://127.0.0.1:8090;
+        # ... other proxy settings
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### Custom SSL settings
+
+For stricter security or compatibility:
+
+```nginx
+# Strong SSL configuration for Nginx
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256';
+ssl_prefer_server_ciphers off;
+ssl_session_timeout 1d;
+ssl_session_cache shared:SSL:50m;
+```
+
+## Next steps
+
+- Complete [production setup](/deployment/production-setup) verification steps
+- Review [operational recommendations](/deployment/self-hosting#operational-recommendations)
+- Set up [monitoring and backups](/deployment/self-hosting#database-backups)

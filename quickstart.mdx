@@ -1,80 +1,141 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get started with Email Tracker in under 5 minutes
 ---
 
-## Get started in three steps
+This guide will help you set up Email Tracker and send your first tracked email.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Before you begin, make sure you have:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- Node.js installed (v18 or higher recommended)
+- Chrome browser
+- A Gmail account
+- Git installed
 
-### Step 2: Deploy your changes
+## Setup steps
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Steps>
+  <Step title="Clone and install dependencies">
+    Clone the repository and install all dependencies:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    <CodeGroup>
+    ```bash npm
+    git clone <your-fork-or-repo-url>
+    cd email-tracker
+    npm install
+    ```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash yarn
+    git clone <your-fork-or-repo-url>
+    cd email-tracker
+    yarn install
+    ```
 
-### Step 3: Go live
+    ```bash pnpm
+    git clone <your-fork-or-repo-url>
+    cd email-tracker
+    pnpm install
+    ```
+    </CodeGroup>
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Build workspaces">
+    Build the shared library and server packages:
+
+    <CodeGroup>
+    ```bash npm
+    npm --workspace=shared run build
+    npm --workspace=server run build
+    ```
+
+    ```bash yarn
+    yarn workspace shared build
+    yarn workspace server build
+    ```
+
+    ```bash pnpm
+    pnpm --filter shared build
+    pnpm --filter server build
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Start the server">
+    Start the tracking server with environment variables:
+
+    <CodeGroup>
+    ```bash npm
+    PORT=8090 DASHBOARD_TOKEN=change-me npm --workspace=server run start
+    ```
+
+    ```bash yarn
+    PORT=8090 DASHBOARD_TOKEN=change-me yarn workspace server start
+    ```
+
+    ```bash pnpm
+    PORT=8090 DASHBOARD_TOKEN=change-me pnpm --filter server start
+    ```
+    </CodeGroup>
+
+    <Note>
+      Replace `change-me` with a strong, random token. This token is required to access your dashboard.
+    </Note>
+
+    Verify the server is running:
+
+    ```bash
+    curl http://localhost:8090/health
+    ```
+  </Step>
+
+  <Step title="Load the Chrome extension">
+    Install the extension in Chrome:
+
+    1. Open Chrome and navigate to `chrome://extensions`
+    2. Enable **Developer mode** using the toggle in the top right
+    3. Click **Load unpacked**
+    4. Select the `extension/` folder from your cloned repository
+
+    <Note>
+      The extension icon should now appear in your Chrome toolbar.
+    </Note>
+  </Step>
+
+  <Step title="Configure the extension">
+    Open the extension popup and configure:
+
+    1. Click the Email Tracker extension icon in your toolbar
+    2. Set **Tracker Base URL** to `http://localhost:8090` (for local development)
+    3. Set **Dashboard Token** to match your `DASHBOARD_TOKEN` from Step 3
+    4. Save your settings
+
+    <Warning>
+      Both values must match what you configured when starting the server, or tracking will not work.
+    </Warning>
+  </Step>
+
+  <Step title="Send your first tracked email">
+    Test the complete tracking flow:
+
+    1. Go to [Gmail](https://mail.google.com)
+    2. Compose a new email message
+    3. Enable tracking (the extension will inject the tracking pixel automatically)
+    4. Send the email to yourself or another account
+    5. Open the email you just sent
+    6. Check the dashboard at `http://localhost:8090/dashboard` to see the tracking event
+
+    <Note>
+      Opens by the sender (you) are automatically suppressed and won't increment the open count, but will still appear in the dashboard for debugging.
+    </Note>
+  </Step>
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
+Now that you have Email Tracker running:
 
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+- Learn about [installation options](/installation) for production deployments
+- Configure [environment variables](/configuration) for your use case
+- Set up HTTPS for production email tracking

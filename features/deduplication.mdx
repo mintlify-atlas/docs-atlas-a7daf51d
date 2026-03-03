@@ -1,0 +1,528 @@
+---
+title: Deduplication
+description: Understand how duplicate opens are detected, DEDUP_WINDOW_MS configuration, and deduplication strategies
+---
+
+## Why deduplication matters
+
+Email clients and proxies often request tracking pixels multiple times for a single message open:
+
+- **Prefetch/preview**: Email clients may load images before the user sees the message
+- **Re-renders**: Mobile apps may reload images when scrolling
+- **Proxy caching**: Gmail Image Proxy may fetch images multiple times
+- **Multiple devices**: User opens same email on phone and computer
+
+Without deduplication, these would artificially inflate open counts.
+
+## How deduplication works
+
+Email Tracker uses **time-window-based deduplication** with multiple strategies:
+
+1. **Exact match deduplication** - Same IP + User-Agent within time window
+2. **User-Agent-only deduplication** - Same User-Agent for proxy requests
+3. **Proxy window deduplication** - Any Google proxy hit within time window
+
+All events (including duplicates) are stored in the database, but only **non-duplicate** events increment `open_count`.
+
+## Deduplication window
+
+The deduplication window is configurable via environment variable:
+
+```bash
+# Default: 30 seconds (30000 ms)
+DEDUP_WINDOW_MS=30000 npm --workspace=server run start
+```
+
+```typescript
+// server/src/services/openRecorder.ts:6
+const DEDUP_WINDOW_MS = Number(process.env.DEDUP_WINDOW_MS || 30_000);
+```
+
+<Note>
+  The deduplication window defines how long after an open event the system will consider subsequent requests from the same source as duplicates.
+</Note>
+
+## Deduplication strategies
+
+### Strategy 1: Exact match (IP + User-Agent)
+
+The most precise strategy matches IP address **and** User-Agent:
+
+```typescript
+// server/src/services/openRecorder.ts:39-48
+const findRecentDuplicateStmt = db.prepare(`
+  SELECT id
+  FROM open_events
+  WHERE email_id = ?
+    AND IFNULL(ip_address, '') = IFNULL(?, '')
+    AND IFNULL(user_agent, '') = IFNULL(?, '')
+    AND opened_at >= ?
+  ORDER BY opened_at DESC
+  LIMIT 1
+`);
+```
+
+Usage:
+
+```typescript
+// server/src/services/openRecorder.ts:116-122
+const dedupeThreshold = new Date(Date.parse(input.openedAtIso) - DEDUP_WINDOW_MS).toISOString();
+const duplicateRow = findRecentDuplicateStmt.get(
+  input.payload.email_id,
+  input.ipAddress,
+  input.userAgent,
+  dedupeThreshold
+) as { id: number } | undefined;
+```
+
+<Steps>
+  <Step title="Check email_id">
+    Deduplication is scoped to individual emails (not global)
+  </Step>
+  
+  <Step title="Compare IP + User-Agent">
+    Both must match exactly (after normalization)
+  </Step>
+  
+  <Step title="Check time window">
+    Previous open must be within `DEDUP_WINDOW_MS`
+  </Step>
+  
+  <Step title="Return result">
+    If match found, current event is marked as duplicate
+  </Step>
+</Steps>
+
+### Strategy 2: User-Agent-only (for proxies)
+
+For proxy requests (e.g., Gmail Image Proxy), IP addresses may vary, so we deduplicate by User-Agent alone:
+
+```typescript
+// server/src/services/openRecorder.ts:50-58
+const findRecentDuplicateByAgentStmt = db.prepare(`
+  SELECT id
+  FROM open_events
+  WHERE email_id = ?
+    AND IFNULL(user_agent, '') = IFNULL(?, '')
+    AND opened_at >= ?
+  ORDER BY opened_at DESC
+  LIMIT 1
+`);
+```
+
+Usage:
+
+```typescript
+// server/src/services/openRecorder.ts:124-128
+const duplicateByAgentRow = isLikelyProxyAgent(input.userAgent)
+  ? (findRecentDuplicateByAgentStmt.get(input.payload.email_id, input.userAgent, dedupeThreshold) as
+      | { id: number }
+      | undefined)
+  : undefined;
+```
+
+### Strategy 3: Proxy window (any Google proxy)
+
+For Google Image Proxy, any hit within the time window for the same email is considered a duplicate:
+
+```typescript
+// server/src/services/openRecorder.ts:60-72
+const findRecentDuplicateProxyStmt = db.prepare(`
+  SELECT id
+  FROM open_events
+  WHERE email_id = ?
+    AND opened_at >= ?
+    AND (
+      LOWER(IFNULL(user_agent, '')) LIKE '%googleimageproxy%'
+      OR LOWER(IFNULL(user_agent, '')) LIKE '%google image proxy%'
+      OR LOWER(IFNULL(user_agent, '')) LIKE '%ggpht.com%'
+    )
+  ORDER BY opened_at DESC
+  LIMIT 1
+`);
+```
+
+Usage:
+
+```typescript
+// server/src/services/openRecorder.ts:130-133
+const duplicateByProxyWindowRow = isLikelyProxyAgent(input.userAgent)
+  ? (findRecentDuplicateProxyStmt.get(input.payload.email_id, dedupeThreshold) as { id: number } | undefined)
+  : undefined;
+```
+
+### Proxy detection
+
+```typescript
+// server/src/services/openRecorder.ts:339-342
+function isLikelyProxyAgent(userAgent: string | null): boolean {
+  const ua = String(userAgent || "").toLowerCase();
+  return ua.includes("googleimageproxy") || ua.includes("google image proxy") || ua.includes("ggpht.com");
+}
+```
+
+<Warning>
+  Proxy detection is **heuristic-based** and may not catch all proxy types. Only Google Image Proxy is explicitly detected.
+</Warning>
+
+## Deduplication logic flow
+
+The deduplication decision combines all three strategies:
+
+```typescript
+// server/src/services/openRecorder.ts:134
+const isDuplicate = Boolean(duplicateRow || duplicateByAgentRow || duplicateByProxyWindowRow);
+```
+
+<Steps>
+  <Step title="Calculate deduplication threshold">
+    `dedupeThreshold = current_time - DEDUP_WINDOW_MS`
+  </Step>
+  
+  <Step title="Run exact match query">
+    Check for recent open with same IP + User-Agent
+  </Step>
+  
+  <Step title="Run User-Agent-only query (if proxy)">
+    If User-Agent looks like a proxy, check for same User-Agent
+  </Step>
+  
+  <Step title="Run proxy window query (if proxy)">
+    If User-Agent looks like a proxy, check for any Google proxy hit
+  </Step>
+  
+  <Step title="Determine duplicate status">
+    If **any** strategy found a match, mark as duplicate
+  </Step>
+  
+  <Step title="Store event and update counts">
+    Insert event into `open_events` table. If not duplicate (and not suppressed), increment `tracked_emails.open_count`
+  </Step>
+</Steps>
+
+## Database flags
+
+Duplicate events are stored with a flag:
+
+```sql
+-- server/src/db/schema.sql:27
+is_duplicate INTEGER NOT NULL DEFAULT 0 CHECK (is_duplicate IN (0, 1)),
+```
+
+Duplicate events are stored for audit/debug but **do not increment** `open_count`:
+
+```typescript
+// server/src/services/openRecorder.ts:161-163
+if (!isDuplicate && !isSenderSuppressed) {
+  incrementOpenCountStmt.run(input.payload.email_id);
+}
+```
+
+## Open count updates
+
+The `tracked_emails.open_count` field is incremented only for non-duplicate, non-suppressed opens:
+
+```typescript
+// server/src/services/openRecorder.ts:95-99
+const incrementOpenCountStmt = db.prepare(`
+  UPDATE tracked_emails
+  SET open_count = open_count + 1
+  WHERE email_id = ?
+`);
+```
+
+## Deduplication vs suppression
+
+Deduplication and suppression are **independent** filters:
+
+```typescript
+// server/src/services/openRecorder.ts:134-140
+const isDuplicate = Boolean(duplicateRow || duplicateByAgentRow || duplicateByProxyWindowRow);
+const isSenderSuppressed = Boolean(input.forceSenderSuppressed);
+const suppressionReason = isDuplicate
+  ? "duplicate"
+  : isSenderSuppressed
+    ? String(input.suppressionReason || "mark_suppress_next")
+    : null;
+```
+
+| Scenario | `is_duplicate` | `is_sender_suppressed` | `suppression_reason` | Counted? |
+|----------|----------------|------------------------|----------------------|----------|
+| First legitimate open | 0 | 0 | `null` | ✅ Yes |
+| Duplicate open | 1 | 0 | `"duplicate"` | ❌ No |
+| Sender self-open | 0 | 1 | `"mark_suppress_next"` | ❌ No |
+| Duplicate sender open | 1 | 1 | `"duplicate"` | ❌ No |
+
+<Note>
+  If an event is **both** duplicate and sender-suppressed, `suppression_reason` is set to `"duplicate"` (deduplication takes precedence).
+</Note>
+
+## IP address normalization
+
+IPv6-mapped IPv4 addresses are normalized before deduplication:
+
+```typescript
+// server/src/routes/track.ts:257-266
+function normalizeIp(ipAddress: string | null): string {
+  const raw = String(ipAddress || "").trim().toLowerCase();
+  if (!raw) {
+    return "";
+  }
+
+  const unwrapped = raw.startsWith("::ffff:") ? raw.slice(7) : raw;
+  const ipv4Match = unwrapped.match(/\d{1,3}(?:\.\d{1,3}){3}/);
+  return ipv4Match?.[0] || unwrapped;
+}
+```
+
+Examples:
+- `::ffff:192.168.1.1` → `192.168.1.1`
+- `203.0.113.42` → `203.0.113.42`
+- `2001:db8::1` → `2001:db8::1`
+
+## Configuring the deduplication window
+
+### Short window (10 seconds)
+
+Ideal for **high-traffic scenarios** where you want to catch rapid duplicates but allow re-opens:
+
+```bash
+DEDUP_WINDOW_MS=10000 npm --workspace=server run start
+```
+
+**Pros:**
+- Faster re-opens are counted
+- User can open on multiple devices within a short time
+
+**Cons:**
+- May miss slow proxy duplicates
+- Prefetch requests may be counted separately
+
+### Medium window (30 seconds, default)
+
+Balanced approach for **most use cases**:
+
+```bash
+DEDUP_WINDOW_MS=30000 npm --workspace=server run start
+```
+
+**Pros:**
+- Catches most proxy duplicates
+- Handles typical prefetch/preview delays
+
+**Cons:**
+- User re-opens within 30s are ignored
+
+### Long window (2 minutes)
+
+Ideal for **high-precision tracking** where you want to avoid counting any rapid re-opens:
+
+```bash
+DEDUP_WINDOW_MS=120000 npm --workspace=server run start
+```
+
+**Pros:**
+- Very conservative duplicate filtering
+- Catches slow proxy behavior
+
+**Cons:**
+- Legitimate re-opens may be missed
+- User switching devices may be ignored
+
+## Transaction safety
+
+Deduplication queries and open count updates run in a **SQLite transaction**:
+
+```typescript
+// server/src/services/openRecorder.ts:107-172
+const txn = db.transaction((input: RecordOpenInput): RecordOpenResult => {
+  // 1. Upsert tracked_emails row
+  upsertTrackedEmailStmt.run({ /* ... */ });
+
+  // 2. Run deduplication queries
+  const dedupeThreshold = new Date(Date.parse(input.openedAtIso) - DEDUP_WINDOW_MS).toISOString();
+  const duplicateRow = findRecentDuplicateStmt.get(/* ... */);
+  const duplicateByAgentRow = isLikelyProxyAgent(input.userAgent)
+    ? findRecentDuplicateByAgentStmt.get(/* ... */)
+    : undefined;
+  const duplicateByProxyWindowRow = isLikelyProxyAgent(input.userAgent)
+    ? findRecentDuplicateProxyStmt.get(/* ... */)
+    : undefined;
+
+  const isDuplicate = Boolean(duplicateRow || duplicateByAgentRow || duplicateByProxyWindowRow);
+  const isSenderSuppressed = Boolean(input.forceSenderSuppressed);
+
+  // 3. Insert open_events row
+  insertOpenEventStmt.run(/* ... */);
+
+  // 4. Increment open_count if not duplicate/suppressed
+  if (!isDuplicate && !isSenderSuppressed) {
+    incrementOpenCountStmt.run(input.payload.email_id);
+  }
+
+  // 5. Return result
+  const row = getOpenCountStmt.get(input.payload.email_id) as CountRow | undefined;
+  return {
+    isDuplicate,
+    isSenderSuppressed,
+    openCount: row?.open_count ?? 0
+  };
+});
+```
+
+<Note>
+  Transactions ensure that deduplication checks and count increments are **atomic**. Concurrent opens will be serialized by SQLite's locking.
+</Note>
+
+## Dashboard queries
+
+Dashboard APIs exclude duplicates by default:
+
+```sql
+-- server/src/routes/dashboard.ts:88-91
+WHERE is_duplicate = 0
+  AND IFNULL(is_sender_suppressed, 0) = 0
+ORDER BY datetime(opened_at) DESC
+```
+
+To view **all** events (including duplicates), query the database directly:
+
+```sql
+SELECT * FROM open_events WHERE email_id = 'abc-123' ORDER BY opened_at DESC;
+```
+
+## Debugging deduplication
+
+### Check duplicate events
+
+Query for duplicates in SQLite:
+
+```bash
+sqlite3 server/data/tracker.db
+```
+
+```sql
+SELECT 
+  email_id,
+  opened_at,
+  ip_address,
+  user_agent,
+  is_duplicate,
+  suppression_reason
+FROM open_events
+WHERE email_id = 'your-email-id'
+ORDER BY opened_at ASC;
+```
+
+### Check time deltas
+
+```sql
+SELECT 
+  email_id,
+  opened_at,
+  LAG(opened_at) OVER (PARTITION BY email_id ORDER BY opened_at) AS prev_opened_at,
+  (julianday(opened_at) - julianday(LAG(opened_at) OVER (PARTITION BY email_id ORDER BY opened_at))) * 86400 AS seconds_since_prev,
+  is_duplicate
+FROM open_events
+WHERE email_id = 'your-email-id'
+ORDER BY opened_at ASC;
+```
+
+### Monitor server logs
+
+The server logs each pixel hit with duplicate/suppression status:
+
+```typescript
+// server/src/routes/track.ts:163-165
+console.info(
+  `[pixel-hit] email_id=${payload.email_id} duplicate=${result.isDuplicate ? 1 : 0} sender_suppressed=${result.isSenderSuppressed ? 1 : 0} counted=${!result.isDuplicate && !result.isSenderSuppressed ? 1 : 0} unique_open_count=${result.openCount} ip=${ipAddress || "-"}`
+);
+```
+
+Example log:
+
+```
+[pixel-hit] email_id=abc-123 duplicate=0 sender_suppressed=0 counted=1 unique_open_count=1 ip=203.0.113.42
+[pixel-hit] email_id=abc-123 duplicate=1 sender_suppressed=0 counted=0 unique_open_count=1 ip=203.0.113.42
+```
+
+## Frequently asked questions
+
+<AccordionGroup>
+  <Accordion title="Why is DEDUP_WINDOW_MS 30 seconds by default?">
+    30 seconds is a balance between:
+    - **Catching duplicates**: Most proxy prefetch/preview requests arrive within 10-30 seconds
+    - **Allowing re-opens**: Users who close and reopen an email after 30s get counted again
+    
+    Adjust based on your use case:
+    - **Higher precision, fewer re-opens counted**: Increase to 60-120 seconds
+    - **More lenient, count rapid re-opens**: Decrease to 10-15 seconds
+  </Accordion>
+  
+  <Accordion title="What if a user opens the same email on phone and computer?">
+    If both opens occur **within the deduplication window** and have:
+    - Same IP (e.g., same WiFi network)
+    - Different User-Agents (phone vs computer)
+    
+    They will be counted as **separate opens** (exact match requires IP + User-Agent).
+    
+    If opens are **outside the deduplication window**, both are counted regardless of IP/User-Agent.
+  </Accordion>
+  
+  <Accordion title="How does deduplication handle Gmail Image Proxy?">
+    Gmail Image Proxy requests:
+    1. Are detected via User-Agent (`googleimageproxy`)
+    2. Use User-Agent-only deduplication (IP varies per Google data center)
+    3. Use proxy window deduplication (any Google proxy hit is a duplicate)
+    
+    This prevents Gmail's prefetch behavior from inflating counts.
+  </Accordion>
+  
+  <Accordion title="Can I disable deduplication entirely?">
+    Yes, set `DEDUP_WINDOW_MS=0`:
+    
+    ```bash
+    DEDUP_WINDOW_MS=0 npm --workspace=server run start
+    ```
+    
+    This will count **every** pixel hit, including duplicates. Not recommended for production.
+  </Accordion>
+  
+  <Accordion title="Why are duplicate events stored in the database?">
+    Storing duplicates provides:
+    - **Audit trail**: See all pixel hits, not just counted opens
+    - **Debugging**: Diagnose deduplication issues
+    - **Analytics**: Measure proxy behavior, prefetch rates, etc.
+    
+    To view duplicates, query `open_events` directly (dashboard APIs exclude them).
+  </Accordion>
+  
+  <Accordion title="What happens if two opens arrive simultaneously?">
+    SQLite transactions serialize concurrent writes. If two pixel requests arrive at exactly the same time:
+    1. First request acquires database lock
+    2. First request runs deduplication queries (finds nothing)
+    3. First request inserts event and increments count
+    4. First request releases lock
+    5. Second request acquires lock
+    6. Second request runs deduplication queries (finds first request's event)
+    7. Second request marks as duplicate
+    
+    The order is determined by SQLite's lock acquisition order (usually network arrival order).
+  </Accordion>
+</AccordionGroup>
+
+## Related features
+
+<CardGroup cols={2}>
+  <Card title="Email tracking" icon="envelope" href="/features/email-tracking">
+    Learn how pixel tracking works end-to-end
+  </Card>
+  
+  <Card title="Sender suppression" icon="user-slash" href="/features/sender-suppression">
+    Understand identity-based suppression
+  </Card>
+  
+  <Card title="Dashboard analytics" icon="chart-line" href="/features/dashboard-analytics">
+    Explore dashboard APIs and analytics features
+  </Card>
+</CardGroup>

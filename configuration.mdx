@@ -1,0 +1,266 @@
+---
+title: Configuration
+description: Configure environment variables, extension settings, and optional parameters
+---
+
+Email Tracker requires configuration at both the server and extension level. This guide covers all available configuration options.
+
+## Server environment variables
+
+Configure the server using environment variables when starting the application.
+
+### Required variables
+
+<ParamField path="PORT" type="string" default="8080">
+  The port number the server listens on.
+
+  ```bash
+  PORT=8090
+  ```
+
+  <Note>
+    Choose a port that doesn't conflict with other services on your system.
+  </Note>
+</ParamField>
+
+<ParamField path="DASHBOARD_TOKEN" type="string" required>
+  Authentication token for dashboard APIs. Required for accessing tracking data.
+
+  ```bash
+  DASHBOARD_TOKEN=your-strong-random-token-here
+  ```
+
+  <Warning>
+    Use a strong, random token. This protects access to your tracking data. Never commit this value to version control.
+  </Warning>
+</ParamField>
+
+### Optional variables
+
+<ParamField path="DB_PATH" type="string" default="server/data/tracker.db">
+  Path to the SQLite database file.
+
+  ```bash
+  DB_PATH=/var/lib/email-tracker/tracker.db
+  ```
+
+  <Note>
+    The directory must exist and be writable. The database file will be created automatically if it doesn't exist.
+  </Note>
+</ParamField>
+
+<ParamField path="DEDUP_WINDOW_MS" type="number" default="30000">
+  Deduplication window in milliseconds. Open events within this window from the same source are marked as duplicates.
+
+  ```bash
+  DEDUP_WINDOW_MS=30000
+  ```
+
+  This prevents counting multiple opens from email client prefetching or automatic reloads. Default is 30 seconds (30000ms).
+</ParamField>
+
+### Example configurations
+
+<CodeGroup>
+```bash Development
+PORT=8090 \
+DASHBOARD_TOKEN=dev-token-change-in-production \
+npm --workspace=server run start
+```
+
+```bash Production
+PORT=8090 \
+DASHBOARD_TOKEN=prod-strong-random-token-here \
+DB_PATH=/var/lib/email-tracker/tracker.db \
+DEDUP_WINDOW_MS=30000 \
+node server/dist/index.js
+```
+
+```bash Custom deduplication
+PORT=8090 \
+DASHBOARD_TOKEN=your-token \
+DEDUP_WINDOW_MS=60000 \
+npm --workspace=server run start
+```
+</CodeGroup>
+
+## Extension configuration
+
+Configure the Chrome extension through its popup interface.
+
+### Extension popup settings
+
+Access settings by clicking the Email Tracker extension icon in your Chrome toolbar.
+
+#### Tracker Base URL
+
+The URL of your tracking server:
+
+- **Local development**: `http://localhost:8090`
+- **Production**: Your HTTPS domain (e.g., `https://tracker.yourdomain.com`)
+
+<Warning>
+  Production deployments must use HTTPS. Email clients often block non-HTTPS images, which will prevent your tracking pixels from loading.
+</Warning>
+
+#### Dashboard Token
+
+Must match the `DASHBOARD_TOKEN` environment variable set on your server. This authenticates API requests from the extension to the dashboard.
+
+<Note>
+  If you change the token on the server, you must also update it in the extension popup.
+</Note>
+
+### Extension storage
+
+The extension stores configuration and tracking state in Chrome's local storage:
+
+- Tracker Base URL
+- Dashboard Token
+- User ID (generated on first use, stable per Chrome profile)
+- Recent email tracking data
+
+This data is stored locally and never leaves your browser except when communicating with your self-hosted server.
+
+## Self-hosting configuration checklist
+
+If you're self-hosting Email Tracker, ensure you configure:
+
+<Steps>
+  <Step title="Domain or host">
+    Set up your own domain (recommended) or use a host/IP address.
+  </Step>
+
+  <Step title="HTTPS reverse proxy">
+    Configure a reverse proxy (Caddy or Nginx) for production email client compatibility.
+
+    Sample configurations available in:
+    - `deploy/Caddyfile`
+    - `deploy/nginx-email-tracker.conf`
+  </Step>
+
+  <Step title="Server PORT">
+    Choose a port for your server (default: 8080, example: 8090).
+  </Step>
+
+  <Step title="Strong DASHBOARD_TOKEN">
+    Generate a strong, random token for dashboard authentication.
+
+    Example generation:
+    ```bash
+    openssl rand -base64 32
+    ```
+  </Step>
+
+  <Step title="Extension popup values">
+    Configure the extension with:
+    - Your tracker URL (HTTPS domain)
+    - Your dashboard token (matching the server)
+  </Step>
+</Steps>
+
+This is the minimum configuration for a working deployment.
+
+## Production recommendations
+
+### Security
+
+- Keep `DASHBOARD_TOKEN` private and secure
+- Use HTTPS for all production deployments
+- Store environment variables in secure configuration management
+- Never commit tokens or secrets to version control
+
+### Reliability
+
+- Run the server with a process manager (`systemd` or `pm2`)
+- Monitor server health and disk usage
+- Set up automatic restarts on failure
+
+### Data management
+
+- Back up the SQLite database file regularly
+- Rotate logs and monitor disk usage
+- Set up automated database backups
+
+Example backup script:
+
+```bash
+#!/bin/bash
+DB_PATH="/var/lib/email-tracker/tracker.db"
+BACKUP_DIR="/var/backups/email-tracker"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+sqlite3 "$DB_PATH" ".backup '$BACKUP_DIR/tracker_$TIMESTAMP.db'"
+```
+
+### Monitoring
+
+Consider monitoring:
+
+- Server uptime and health endpoint (`/health`)
+- Database size and growth
+- API response times
+- Error rates in logs
+
+## Environment-specific configurations
+
+### Development
+
+```bash
+# Use localhost and simple token
+PORT=8090
+DASHBOARD_TOKEN=dev-token
+```
+
+Extension: `http://localhost:8090`
+
+### Staging
+
+```bash
+# Use HTTPS domain and secure token
+PORT=8090
+DASHBOARD_TOKEN=staging-strong-token
+DB_PATH=/var/lib/email-tracker/staging.db
+```
+
+Extension: `https://tracker-staging.yourdomain.com`
+
+### Production
+
+```bash
+# Full configuration with custom settings
+PORT=8090
+DASHBOARD_TOKEN=prod-very-strong-random-token
+DB_PATH=/var/lib/email-tracker/production.db
+DEDUP_WINDOW_MS=30000
+```
+
+Extension: `https://tracker.yourdomain.com`
+
+## Troubleshooting configuration issues
+
+### Extension can't connect to server
+
+- Verify the Tracker Base URL matches your server URL exactly
+- Check that the server is running and accessible
+- Ensure HTTPS is used in production
+- Check browser console for connection errors
+
+### Dashboard authentication fails
+
+- Verify `DASHBOARD_TOKEN` matches between server and extension
+- Check that the token has no leading/trailing whitespace
+- Restart the server after changing environment variables
+
+### Tracking pixels not loading
+
+- Confirm HTTPS is used in production (required by most email clients)
+- Verify the server is accessible from the internet
+- Check firewall and DNS configuration
+- Test the pixel endpoint directly: `curl https://your-domain/t/test.gif`
+
+## Next steps
+
+- Review the [quickstart guide](/quickstart) for testing your configuration
+- Learn about [installation options](/installation) for deployment
+- Set up monitoring and backups for production use

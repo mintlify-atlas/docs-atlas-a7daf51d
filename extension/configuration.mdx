@@ -1,0 +1,152 @@
+---
+title: Configure the extension
+description: Set up tracker base URL and dashboard token in the extension popup
+---
+
+After installing the extension, you must configure it with your tracker server details to enable tracking and analytics.
+
+## Configuration settings
+
+The extension stores four configuration values locally (see `extension/src/background/serviceWorker.js:1-6`):
+
+- **User ID**: Auto-generated stable UUID (created on first install)
+- **Tracker Base URL**: Your tracker server endpoint
+- **Dashboard Token**: Authentication token for dashboard API access
+- **Recent Emails**: Local cache of tracked emails (last 100)
+
+## Open the extension popup
+
+Click the Email Tracker extension icon in your Chrome toolbar to open the configuration popup.
+
+The popup displays:
+- Your stable User UUID (read-only)
+- Tracker Base URL input field
+- Dashboard Token input field (password type)
+- Recently tracked emails list
+- Pixel debug information
+
+<Tip>
+If the extension icon isn't visible in your toolbar, click the puzzle piece icon and pin "Gmail Email Tracker" to the toolbar.
+</Tip>
+
+## Configure tracker base URL
+
+<Steps>
+  <Step title="Enter your tracker URL">
+    In the **Tracker Base URL** field, enter the base URL of your tracker server.
+
+    **For local development:**
+    ```
+    http://localhost:8090
+    ```
+
+    **For production (HTTPS required):**
+    ```
+    https://your-domain.com
+    ```
+
+    The URL must start with `http://` or `https://`. Trailing slashes are automatically removed.
+  </Step>
+
+  <Step title="Save the configuration">
+    Click the **Save URL** button below the input fields.
+
+    A green status message "Saved!" appears below the button if successful.
+  </Step>
+</Steps>
+
+<Warning>
+Many email clients block non-HTTPS images. Use HTTPS tracker URLs for production to ensure reliable tracking. See [HTTPS Setup](/deploy/https) for reverse proxy configuration.
+</Warning>
+
+## Configure dashboard token
+
+The dashboard token authenticates requests to protected dashboard APIs.
+
+<Steps>
+  <Step title="Enter your token">
+    In the **Dashboard Token** field, enter the same token value you configured on the server via the `DASHBOARD_TOKEN` environment variable.
+
+    This token is sent in the `X-Tracker-Token` header for dashboard API requests (see `extension/src/background/serviceWorker.js:189`).
+  </Step>
+
+  <Step title="Save the configuration">
+    Click the **Save URL** button to save both the tracker URL and dashboard token together.
+  </Step>
+</Steps>
+
+<Tip>
+Keep your dashboard token private. Anyone with this token can access your tracking analytics via the dashboard APIs.
+</Tip>
+
+## Default values
+
+On first install, the extension sets these defaults (see `extension/src/background/serviceWorker.js:8,11-14`):
+
+- **Tracker Base URL**: `https://email-tracker.duckdns.org` (placeholder)
+- **User ID**: Generated via `crypto.randomUUID()`
+
+You must update the tracker base URL to point to your own server.
+
+## Verify configuration
+
+After saving your settings:
+
+1. The popup's **Recently Tracked Emails** section will display "No tracked emails yet" if you haven't sent any tracked messages
+2. The **Pixel Debug** section will show "Debug data will appear after tracking emails" or configuration warnings
+3. Send a test email from Gmail to verify the configuration (see [Extension Usage](/extension/usage))
+
+## Configuration storage
+
+All settings are stored locally in Chrome's `storage.local` API (see `extension/src/background/serviceWorker.js:1-6`):
+
+```javascript
+const STORAGE_KEYS = {
+  USER_ID: "tracker_user_id",
+  TRACKER_BASE_URL: "tracker_base_url",
+  RECENT_EMAILS: "recent_tracked_emails",
+  DASHBOARD_TOKEN: "dashboard_token"
+};
+```
+
+Settings persist across browser sessions and are not synced between devices.
+
+## Update configuration
+
+You can update your tracker URL or dashboard token at any time:
+
+1. Open the extension popup
+2. Modify the **Tracker Base URL** or **Dashboard Token** field
+3. Click **Save URL**
+
+Changes take effect immediately for new tracking requests and dashboard API calls.
+
+<Warning>
+Changing your tracker base URL will not update previously sent emails. Emails sent with the old URL will continue reporting to the old server.
+</Warning>
+
+## Troubleshooting
+
+### "Token missing" in debug section
+
+If the Pixel Debug section shows "token missing", you haven't configured the **Dashboard Token** yet. Enter your token and click **Save URL**.
+
+### URL validation errors
+
+The extension validates tracker URLs and rejects invalid formats. Ensure your URL:
+- Starts with `http://` or `https://`
+- Does not include paths (e.g., use `https://example.com`, not `https://example.com/tracker`)
+
+### Cannot reach tracker server
+
+If the popup shows connection errors:
+- Verify your tracker server is running (`curl http://localhost:8090/health`)
+- Check firewall rules allow connections to your tracker URL
+- For HTTPS URLs, ensure SSL certificates are valid
+
+## Next steps
+
+Once configured:
+
+1. [Learn how to use the extension](/extension/usage) to track emails and view analytics
+2. [Set up HTTPS](/deploy/https) for production deployments

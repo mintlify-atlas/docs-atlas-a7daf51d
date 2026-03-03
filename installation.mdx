@@ -1,0 +1,242 @@
+---
+title: Installation
+description: Detailed installation instructions for all Email Tracker components
+---
+
+This guide covers the complete installation process for Email Tracker, including all components and configurations.
+
+## System requirements
+
+- Node.js v18 or higher
+- npm, yarn, or pnpm
+- Chrome browser (for the extension)
+- Git
+
+## Installation steps
+
+### Clone the repository
+
+First, clone the Email Tracker repository:
+
+```bash
+git clone <your-fork-or-repo-url>
+cd email-tracker
+```
+
+### Install dependencies
+
+Install all dependencies for the monorepo:
+
+<CodeGroup>
+```bash npm
+npm install
+```
+
+```bash yarn
+yarn install
+```
+
+```bash pnpm
+pnpm install
+```
+</CodeGroup>
+
+This installs dependencies for all workspaces:
+- `extension/` - Chrome extension (MV3)
+- `server/` - Express tracker + dashboard + SQLite
+- `shared/` - Shared token/types package
+
+### Build the workspaces
+
+Build the shared library and server packages in order:
+
+<Steps>
+  <Step title="Build the shared package">
+    The shared package contains token encoding/decoding logic used by both the server and extension:
+
+    <CodeGroup>
+    ```bash npm
+    npm --workspace=shared run build
+    ```
+
+    ```bash yarn
+    yarn workspace shared build
+    ```
+
+    ```bash pnpm
+    pnpm --filter shared build
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Build the server package">
+    Build the TypeScript server to JavaScript:
+
+    <CodeGroup>
+    ```bash npm
+    npm --workspace=server run build
+    ```
+
+    ```bash yarn
+    yarn workspace server build
+    ```
+
+    ```bash pnpm
+    pnpm --filter server build
+    ```
+    </CodeGroup>
+
+    <Note>
+      The extension does not require a build step as it uses vanilla JavaScript.
+    </Note>
+  </Step>
+</Steps>
+
+### Start the server
+
+Start the tracking server with required environment variables:
+
+<CodeGroup>
+```bash npm
+PORT=8090 DASHBOARD_TOKEN=change-me npm --workspace=server run start
+```
+
+```bash yarn
+PORT=8090 DASHBOARD_TOKEN=change-me yarn workspace server start
+```
+
+```bash pnpm
+PORT=8090 DASHBOARD_TOKEN=change-me pnpm --filter server start
+```
+</CodeGroup>
+
+<Warning>
+  Replace `change-me` with a strong, random token. Keep this token private as it protects access to your tracking dashboard.
+</Warning>
+
+#### Verify server health
+
+Check that the server is running correctly:
+
+```bash
+curl http://localhost:8090/health
+```
+
+You should receive a successful response indicating the server is ready.
+
+### Load the Chrome extension
+
+Install the extension in Chrome using Developer mode:
+
+<Steps>
+  <Step title="Open Chrome extensions">
+    Navigate to `chrome://extensions` in your Chrome browser.
+  </Step>
+
+  <Step title="Enable Developer mode">
+    Toggle **Developer mode** on using the switch in the top right corner.
+  </Step>
+
+  <Step title="Load unpacked extension">
+    1. Click the **Load unpacked** button
+    2. Navigate to your Email Tracker installation directory
+    3. Select the `extension/` folder
+    4. Click **Select** or **Open**
+  </Step>
+
+  <Step title="Verify installation">
+    The Gmail Email Tracker extension should now appear in your extensions list and toolbar.
+  </Step>
+</Steps>
+
+### Configure extension settings
+
+Set up the extension to communicate with your tracking server:
+
+<Steps>
+  <Step title="Open extension popup">
+    Click the Email Tracker extension icon in your Chrome toolbar.
+  </Step>
+
+  <Step title="Set Tracker Base URL">
+    Enter your tracker URL:
+    - For local development: `http://localhost:8090`
+    - For production: your HTTPS domain (e.g., `https://tracker.yourdomain.com`)
+
+    <Warning>
+      Production deployments must use HTTPS. Many email clients block or downgrade non-HTTPS assets.
+    </Warning>
+  </Step>
+
+  <Step title="Set Dashboard Token">
+    Enter the same `DASHBOARD_TOKEN` value you used when starting the server.
+  </Step>
+
+  <Step title="Save settings">
+    Save your configuration. The extension is now ready to track emails.
+  </Step>
+</Steps>
+
+## Production deployment
+
+For production use, you'll need additional setup:
+
+### HTTPS requirement
+
+<Warning>
+  You must use HTTPS in production. Many email clients block or downgrade non-HTTPS assets, which will prevent tracking pixels from loading.
+</Warning>
+
+### Required infrastructure
+
+1. **Domain**: Point your domain DNS to your server
+2. **Firewall**: Open ports 80 and 443
+3. **Node server**: Run on localhost (e.g., `127.0.0.1:8090`)
+4. **Reverse proxy**: Use Caddy or Nginx to:
+   - Terminate TLS
+   - Proxy requests to your Node server
+
+Sample reverse proxy configurations are available in the `deploy/` directory:
+- `deploy/Caddyfile`
+- `deploy/nginx-email-tracker.conf`
+
+### Process management
+
+Run the server with a process manager for reliability:
+
+- **systemd**: For Linux system services
+- **pm2**: Cross-platform process manager
+
+Example with pm2:
+
+```bash
+pm2 start "npm --workspace=server run start" --name email-tracker
+```
+
+## Repository structure
+
+Understanding the project layout:
+
+```
+email-tracker/
+├── extension/          # Chrome extension (MV3)
+│   ├── src/
+│   │   ├── background/ # Service worker, token generation
+│   │   ├── content/    # Gmail integration, pixel injection
+│   │   └── popup/      # Extension settings UI
+│   └── manifest.json
+├── server/             # Express API + dashboard
+│   ├── src/
+│   │   ├── routes/     # Pixel tracking, dashboard APIs
+│   │   ├── services/   # Recording logic, GeoIP
+│   │   └── db/         # SQLite schema and initialization
+│   └── package.json
+├── shared/             # Shared token/types package
+└── deploy/             # Sample reverse proxy configs
+```
+
+## Next steps
+
+- Configure [environment variables](/configuration) for your deployment
+- Review the quickstart guide for testing
+- Set up monitoring and backups for production use

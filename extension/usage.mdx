@@ -1,0 +1,220 @@
+---
+title: Use the extension
+description: Track emails in Gmail, view open counts, and monitor analytics
+---
+
+Once configured, the extension automatically enhances your Gmail interface with tracking capabilities and real-time analytics.
+
+## Compose and send tracked emails
+
+The extension's content script (`extension/src/content/gmailCompose.js`) detects Gmail compose dialogs and injects tracking pixels when you send messages.
+
+<Steps>
+  <Step title="Open Gmail compose">
+    Navigate to Gmail (`https://mail.google.com`) and click **Compose** to create a new message.
+
+    The extension automatically detects compose dialogs, including:
+    - New compose windows
+    - Reply compose areas
+    - Forward compose areas
+  </Step>
+
+  <Step title="Compose your message">
+    Write your email as usual. Add recipients, subject, and message body.
+
+    The extension runs passively in the background and does not modify the compose UI.
+  </Step>
+
+  <Step title="Send the message">
+    Click Gmail's **Send** button.
+
+    The extension intercepts the send action and:
+    1. Generates a unique `email_id` (UUID)
+    2. Creates a tracking token with metadata (user ID, email ID, recipient, sender email, timestamp)
+    3. Injects a 1x1 pixel image at the end of your message HTML:
+       ```html
+       <img src="https://your-tracker.com/t/{token}.gif" width="1" height="1" />
+       ```
+    4. Logs the tracked email to local storage
+    5. Allows Gmail to send the message normally
+  </Step>
+</Steps>
+
+<Tip>
+All emails sent through Gmail are automatically tracked. There is currently no UI toggle to disable tracking on a per-message basis.
+</Tip>
+
+## View open analytics in Gmail inbox
+
+The extension displays badge overlays on email threads in your Gmail inbox showing how many times tracked emails have been opened.
+
+### Inbox badges
+
+When viewing your Gmail inbox (Sent folder recommended):
+
+1. The extension scans visible email threads
+2. For each thread, it extracts tracking tokens from pixel URLs
+3. It queries the dashboard API (`/dashboard/api/emails`) to fetch open counts
+4. Badge overlays appear on thread rows showing:
+   - Number of unique opens (deduplicated)
+   - Number of total open events
+
+<Tip>
+Badges automatically update when you scroll or navigate between folders. The extension fetches fresh analytics from your tracker server for each visible thread.
+</Tip>
+
+## View tracking details in popup
+
+The extension popup provides detailed tracking information for your recent emails.
+
+### Recently tracked emails section
+
+Click the extension icon to open the popup and view:
+
+- **User UUID**: Your stable sender identifier
+- **Recently Tracked Emails**: List of last 100 sent emails with:
+  - Recipient address
+  - Subject line
+  - Sent timestamp
+  - Total open events count
+  - Unique open count
+  - Last opened timestamp
+
+This data combines local storage (email metadata) with live dashboard API responses (open statistics).
+
+### Pixel debug section
+
+The popup's debug section shows detailed diagnostics for each tracked email:
+
+- **Pixel URL**: The full tracking pixel URL embedded in the email
+- **Pixel Host**: Extracted hostname from pixel URL
+- **Tracker Host**: Current configured tracker base URL hostname
+- **Host Match**: Whether pixel host matches tracker host (green = match, red = mismatch)
+- **Backend Status**: Connection status to tracker server
+- **Latest Event**: Timestamp and duplicate flag for most recent open event
+
+<Tip>
+Use the debug section to troubleshoot tracking issues. Common problems include mismatched hosts (old tracker URL) or backend connection failures (server down or wrong token).
+</Tip>
+
+## Sender suppression (prevent self-opens)
+
+The extension implements sender suppression to avoid counting your own opens when you view sent emails in Gmail.
+
+### How it works
+
+When you open a sent email in Gmail:
+
+1. The content script scans the email body for tracking pixel images
+2. It decodes the tracking token to extract the `sender_email`
+3. It compares `sender_email` with your currently logged-in Gmail address
+4. If they match, it sends a `POST /mark-suppress-next` request with the `email_id`
+5. The server marks the next pixel request for that email as sender-suppressed
+6. When Gmail loads the pixel, the server consumes the suppression mark and:
+   - Records the event with `is_sender_suppressed = 1`
+   - Does NOT increment `unique_open_count`
+   - Still stores the event for audit purposes
+
+This prevents your self-opens from inflating recipient open counts.
+
+<Tip>
+Sender suppression is identity-based and automatic. You don't need to configure anything - the extension handles it transparently.
+</Tip>
+
+## Dashboard access
+
+Besides the extension popup and inbox badges, you can view full analytics in the web dashboard:
+
+1. Navigate to `{your-tracker-url}/dashboard` in your browser
+2. The dashboard displays:
+   - All tracked emails with recipient details
+   - Open event history with IP, user agent, and geolocation
+   - Sender suppression indicators
+   - Duplicate event flags
+
+See [Dashboard analytics](/features/dashboard-analytics) for detailed dashboard documentation.
+
+## Best practices
+
+### Use HTTPS in production
+
+Many email clients (Gmail, Outlook, Apple Mail) block or proxy HTTP images. Configure your tracker with HTTPS to ensure reliable pixel loading:
+
+- Set up a reverse proxy (Caddy or Nginx)
+- Use a valid SSL certificate (Let's Encrypt recommended)
+- Update extension **Tracker Base URL** to `https://your-domain.com`
+
+See [HTTPS Setup](/deploy/https) for configuration guides.
+
+### Monitor the popup regularly
+
+Check the extension popup's debug section periodically to catch issues:
+
+- **Host mismatches**: Indicates emails sent with old tracker URL still in local cache
+- **Backend unreachable**: Server is down or token is incorrect
+- **No opens after 24+ hours**: Recipient hasn't opened (or client blocks images)
+
+### Keep dashboard token private
+
+Your dashboard token authenticates all analytics API requests. Treat it like a password:
+
+- Use a strong, randomly generated token (e.g., `openssl rand -hex 32`)
+- Don't commit it to version control
+- Rotate it periodically and update extension configuration
+
+## Limitations
+
+### Image blocking
+
+Some email clients block external images by default:
+
+- **Gmail (web)**: Proxies images through Google servers (still tracks, but IP is Google's)
+- **Outlook**: Prompts users to "Download pictures" before loading
+- **Apple Mail**: Loads images by default in recent versions
+
+Tracking only works when recipients load images (manually or automatically).
+
+### Duplicate detection
+
+The server deduplicates opens within a configurable window (default: 30 seconds, see `server/src/routes/track.ts`). Multiple opens within this window count as one unique open.
+
+This prevents inflated counts from:
+- Email client prefetching
+- Multiple quick re-opens
+- Proxy/security scanners
+
+### Gmail-only support
+
+The extension only works with Gmail web interface (`https://mail.google.com`). It does not support:
+
+- Outlook, Yahoo Mail, or other webmail providers
+- Native email clients (Thunderbird, Apple Mail, Outlook desktop)
+- Gmail mobile apps
+
+To track emails from other clients, you would need to manually insert the pixel URL in your email HTML.
+
+## Troubleshooting
+
+### Emails not tracked
+
+- Check that the extension is enabled at `chrome://extensions`
+- Verify you're composing in Gmail (`https://mail.google.com`)
+- Open browser DevTools console and look for extension errors
+- Ensure tracker server is running (`curl http://localhost:8090/health`)
+
+### No opens recorded
+
+- Recipient may not have opened the email yet
+- Recipient's email client may block external images
+- Firewall/network may be blocking tracker server requests
+- Check dashboard API directly: `curl -H "X-Tracker-Token: your-token" http://localhost:8090/dashboard/api/emails`
+
+### Popup shows "token missing"
+
+You haven't configured the **Dashboard Token** in the extension popup. See [Extension Configuration](/extension/configuration) to set it up.
+
+## Next steps
+
+- [View the web dashboard](/features/dashboard-analytics) for detailed analytics
+- [Set up HTTPS](/deployment/production-setup) for production deployments
+- [Configure deduplication](/configuration) window for your use case

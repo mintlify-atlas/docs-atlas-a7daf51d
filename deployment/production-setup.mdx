@@ -1,0 +1,187 @@
+---
+title: Production setup
+description: Deploy Email Tracker with HTTPS for production use
+---
+
+<Warning>
+  Use HTTPS in production. Many email clients block or downgrade non-HTTPS assets, which will prevent tracking pixels from loading.
+</Warning>
+
+## Why HTTPS is required
+
+Modern email clients implement strict security policies:
+
+- Gmail, Outlook, and other providers proxy or block HTTP images
+- Mixed content policies prevent HTTP resources from loading in HTTPS contexts
+- Without HTTPS, your tracking pixels will not load reliably
+
+HTTPS is not optional for production email tracking.
+
+## Production deployment steps
+
+Follow these steps to deploy Email Tracker with HTTPS:
+
+### 1. Configure DNS
+
+Point your domain's DNS A record to your server's IP address:
+
+```
+tracker.yourdomain.com.  A  203.0.113.10
+```
+
+Wait for DNS propagation (usually a few minutes, can take up to 48 hours).
+
+### 2. Configure firewall and NAT
+
+Open the required ports on your server's firewall:
+
+<CodeGroup>
+```bash UFW (Ubuntu/Debian)
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+```
+
+```bash firewalld (RHEL/CentOS)
+sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd --permanent --add-service=https
+sudo firewall-cmd --reload
+```
+
+```bash iptables
+sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+sudo iptables-save > /etc/iptables/rules.v4
+```
+</CodeGroup>
+
+If your server is behind a router or NAT:
+
+- Forward ports `80` and `443` to your server's internal IP
+- Configure port forwarding in your router's admin interface
+
+### 3. Run Node server on localhost
+
+Start the Email Tracker server on a local port (not exposed to the internet):
+
+```bash
+PORT=8090 DASHBOARD_TOKEN=your-secure-token npm --workspace=server run start
+```
+
+The server should listen on `127.0.0.1:8090` (or your chosen port).
+
+### 4. Set up reverse proxy
+
+Place a reverse proxy in front of your Node.js server to:
+
+- Terminate TLS/SSL connections
+- Proxy requests to the Node server
+- Handle HTTPS certificate management
+
+Choose either Caddy (automatic HTTPS) or Nginx (manual certificate setup).
+
+See the [Reverse proxy configuration](/deployment/reverse-proxy) page for detailed setup instructions with sample configurations.
+
+### 5. Obtain SSL certificate
+
+<Tabs>
+  <Tab title="Caddy">
+    Caddy automatically obtains and renews Let's Encrypt certificates. No manual configuration needed.
+  </Tab>
+  <Tab title="Nginx">
+    Use Certbot to obtain a Let's Encrypt certificate:
+
+    ```bash
+    # Install Certbot
+    sudo apt install certbot python3-certbot-nginx
+
+    # Obtain certificate
+    sudo certbot --nginx -d tracker.yourdomain.com
+    ```
+
+    Certbot will automatically configure renewal via cron.
+  </Tab>
+  <Tab title="Custom certificate">
+    If using a custom certificate from another CA:
+
+    1. Obtain your certificate files:
+       - `fullchain.pem` (certificate + intermediate chain)
+       - `privkey.pem` (private key)
+
+    2. Configure paths in your reverse proxy config
+
+    3. Set up renewal process according to your CA's requirements
+  </Tab>
+</Tabs>
+
+## Verification
+
+After completing the setup, verify your deployment:
+
+### 1. Check HTTPS is working
+
+Visit your domain in a browser:
+
+```
+https://tracker.yourdomain.com/health
+```
+
+You should see:
+- Valid HTTPS certificate (no browser warnings)
+- Response: `{"status":"ok"}`
+
+### 2. Test tracking pixel
+
+Verify the pixel endpoint is accessible via HTTPS:
+
+```bash
+curl -I https://tracker.yourdomain.com/t/test.gif
+```
+
+Expected response:
+```
+HTTP/2 200
+content-type: image/gif
+...
+```
+
+### 3. Update extension configuration
+
+In the Chrome extension popup:
+
+1. Set **Tracker Base URL** to your HTTPS domain:
+   ```
+   https://tracker.yourdomain.com
+   ```
+
+2. Set **Dashboard Token** to match your `DASHBOARD_TOKEN`
+
+3. Send a test email and verify tracking works
+
+## Troubleshooting
+
+### Tracking pixel not loading
+
+- Verify HTTPS certificate is valid (no browser warnings)
+- Check reverse proxy is correctly forwarding to Node server
+- Confirm firewall allows ports 80 and 443
+- Test pixel URL directly in browser
+
+### Certificate errors
+
+- Ensure DNS points to correct server IP
+- Verify domain name matches certificate
+- Check certificate hasn't expired
+- Confirm intermediate certificates are included
+
+### Connection timeout
+
+- Check Node server is running on expected port
+- Verify reverse proxy configuration is correct
+- Test local server: `curl http://127.0.0.1:8090/health`
+- Check firewall rules aren't blocking traffic
+
+## Next steps
+
+- [Configure reverse proxy](/deployment/reverse-proxy) with Caddy or Nginx
+- Review [operational recommendations](/deployment/self-hosting#operational-recommendations)
+- Set up [database backups](/deployment/self-hosting#database-backups)

@@ -1,0 +1,385 @@
+---
+title: Email tracking
+description: Learn how pixel-based tracking works end-to-end, from token generation to open detection
+---
+
+## How tracking works
+
+Email Tracker uses invisible 1x1 pixel images embedded in outgoing emails to detect when recipients open messages. The tracking system consists of three main components:
+
+1. **Token generation** - Creates unique tracking identifiers
+2. **Pixel injection** - Embeds tracking pixels in compose dialogs
+3. **Open detection** - Records opens when pixels are requested
+
+## Token generation
+
+When you compose an email, the extension generates a unique tracking token containing metadata about the message.
+
+### Token structure
+
+Tokens are compact, URL-safe base64-encoded JSON arrays:
+
+```javascript
+// Token payload format (server/src/background/serviceWorker.js:352-363)
+const compactPayload = [
+  payload.user_id,      // Stable user identifier
+  payload.email_id,     // Unique message UUID
+  payload.recipient,    // Recipient email address(es)
+  payload.sent_at,      // ISO timestamp
+  payload.sender_email  // Sender email (optional, for suppression)
+];
+```
+
+### Token encoding process
+
+The extension encodes tokens in the background service worker:
+
+```javascript
+// extension/src/background/serviceWorker.js:21-37
+const userId = await ensureUserId();
+const emailId = crypto.randomUUID();
+const sentAt = new Date().toISOString();
+const recipient = (message.recipient || "unknown").trim();
+const senderEmail = String(message.senderEmail || "").trim().toLowerCase() || null;
+
+const token = encodeTrackingToken({
+  user_id: userId,
+  email_id: emailId,
+  recipient,
+  sender_email: senderEmail ?? undefined,
+  sent_at: sentAt
+});
+
+const pixelUrl = `${baseUrl}/t/${token}.gif`;
+```
+
+<Note>
+  The `user_id` is generated once during extension installation and persists across sessions. The `email_id` is a new UUID for each message.
+</Note>
+
+## Pixel injection
+
+The content script monitors Gmail compose dialogs and injects tracking pixels when you send messages.
+
+### Compose dialog detection
+
+The extension scans for compose dialogs and binds event listeners:
+
+```javascript
+// extension/src/content/gmailCompose.js:161-176
+function scanForComposeDialogs() {
+  const dialogs = document.querySelectorAll('div[role="dialog"]');
+  dialogs.forEach((dialog) => {
+    if (dialog instanceof HTMLElement && dialog.dataset.emailTrackerBound !== "1") {
+      dialog.dataset.emailTrackerBound = "1";
+      bindComposeDialog(dialog);
+    }
+
+    injectTrackingPixelIfNeeded(dialog).catch((error) => {
+      if (!isContextInvalidatedError(error)) {
+        console.warn("Email tracker inject failed:", error);
+      }
+    });
+  });
+}
+```
+
+### Send intent detection
+
+The extension detects send actions through multiple event types:
+
+<Steps>
+  <Step title="Mousedown events">
+    Captures clicks on send buttons before Gmail processes them
+    
+    ```javascript
+    // extension/src/content/gmailCompose.js:188-196
+    dialog.addEventListener(
+      "mousedown",
+      (event) => {
+        if (isSendIntentTarget(event.target)) {
+          triggerInjection();
+        }
+      },
+      true
+    );
+    ```
+  </Step>
+  
+  <Step title="Keyboard shortcuts">
+    Detects Ctrl+Enter or Cmd+Enter send shortcuts
+    
+    ```javascript
+    // extension/src/content/gmailCompose.js:209-223
+    dialog.addEventListener(
+      "keydown",
+      (event) => {
+        const keyboardEvent = event;
+        const isEnter = keyboardEvent.key === "Enter";
+        const hasSendModifier = keyboardEvent.ctrlKey || keyboardEvent.metaKey;
+        if (isEnter && hasSendModifier) {
+          triggerInjection();
+        }
+      },
+      true
+    );
+    ```
+  </Step>
+  
+  <Step title="Recipient changes">
+    Re-injects pixel if recipient changes after initial injection
+    
+    ```javascript
+    // extension/src/content/gmailCompose.js:225-239
+    dialog.addEventListener(
+      "input",
+      (event) => {
+        const target = event.target;
+        if (target.closest('[aria-label="To"], [name="to"]')) {
+          triggerInjection();
+        }
+      },
+      true
+    );
+    ```
+  </Step>
+</Steps>
+
+### Pixel HTML structure
+
+The injected pixel is a 1x1 transparent image with zero opacity:
+
+```javascript
+// extension/src/content/gmailCompose.js:280-298
+const img = document.createElement("img");
+img.setAttribute(TRACKER_PIXEL_MARKER, "1");
+img.src = response.pixelUrl;  // e.g., https://your-domain.com/t/abc123.gif
+img.width = 1;
+img.height = 1;
+img.alt = "";
+img.style.cssText = "width:1px;height:1px;opacity:0;display:block;border:0;";
+
+const compactEmailId = encodeUuidCompact(response.emailId) || response.emailId;
+
+const marker = document.createElement("div");
+marker.id = `s${compactEmailId}`;
+marker.setAttribute("data-email-tracker-marker", "1");
+marker.setAttribute("data-et", compactEmailId);
+marker.hidden = true;
+marker.textContent = "\u200C";  // Zero-width non-joiner
+
+body.appendChild(marker);
+body.appendChild(img);
+```
+
+## Open detection
+
+When a recipient opens the email, their email client requests the tracking pixel from your server.
+
+### Pixel endpoint
+
+The server handles pixel requests at `GET /t/:token.gif`:
+
+```typescript
+// server/src/routes/track.ts:93-178
+trackRouter.get("/t/:token.gif", (req, res) => {
+  const nowMs = Date.now();
+  const openedAtIso = new Date(nowMs).toISOString();
+  const token = req.params.token;
+
+  try {
+    const payload = decodeTrackingToken(token);
+    const ipAddress = getRequestIp(req);
+    const userAgent = req.get("user-agent") || null;
+    const emailId = payload.email_id;
+
+    // Check for sender suppression signal
+    const pendingSuppression = suppressionMap.get(emailId);
+    const wasSuppressedBySignal = Boolean(pendingSuppression);
+
+    if (pendingSuppression) {
+      suppressionMap.delete(emailId);
+    }
+
+    // Record the open event
+    const result = recordOpenEvent({
+      payload,
+      ipAddress,
+      userAgent,
+      openedAtIso,
+      forceSenderSuppressed: wasSuppressedBySignal,
+      suppressionReason: wasSuppressedBySignal ? "mark_suppress_next" : null
+    });
+
+    console.info(
+      `[pixel-hit] email_id=${payload.email_id} duplicate=${result.isDuplicate ? 1 : 0} sender_suppressed=${result.isSenderSuppressed ? 1 : 0} counted=${!result.isDuplicate && !result.isSenderSuppressed ? 1 : 0} unique_open_count=${result.openCount}`
+    );
+  } catch (error) {
+    console.error("Tracking pixel processing failed:", error);
+  }
+
+  // Always return transparent GIF (even on error)
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Content-Type", "image/gif");
+  res.status(200).send(TRANSPARENT_PIXEL_GIF);
+});
+```
+
+### Transparent pixel
+
+The server returns a 1x1 transparent GIF for all requests:
+
+```typescript
+// server/src/routes/track.ts:5
+const TRANSPARENT_PIXEL_GIF = Buffer.from(
+  "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+  "base64"
+);
+```
+
+### Request metadata extraction
+
+The server captures rich metadata from each pixel request:
+
+<CodeGroup>
+```typescript IP address
+// server/src/routes/track.ts:229-245
+function getRequestIp(req): string | null {
+  const forwardedFor = req.headers["x-forwarded-for"];
+
+  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
+    const first = forwardedFor.split(",")[0]?.trim();
+    return first || null;
+  }
+
+  return req.ip ?? req.socket?.remoteAddress ?? null;
+}
+```
+
+```typescript User agent
+// server/src/routes/track.ts:101
+const userAgent = req.get("user-agent") || null;
+```
+
+```typescript Timestamp
+// server/src/routes/track.ts:94-95
+const nowMs = Date.now();
+const openedAtIso = new Date(nowMs).toISOString();
+```
+</CodeGroup>
+
+## End-to-end flow
+
+Here's the complete lifecycle of a tracked email:
+
+<Steps>
+  <Step title="User composes email">
+    Gmail compose dialog is detected by content script
+  </Step>
+  
+  <Step title="Token generation">
+    Background worker generates `user_id`, `email_id`, and tracking token
+  </Step>
+  
+  <Step title="Pixel injection">
+    Content script injects hidden `<img>` tag with pixel URL into message body
+  </Step>
+  
+  <Step title="Email sent">
+    Message is sent through Gmail with embedded tracking pixel
+  </Step>
+  
+  <Step title="Recipient opens email">
+    Recipient's email client renders HTML and requests pixel URL
+  </Step>
+  
+  <Step title="Server records open">
+    Tracking server decodes token, extracts metadata, checks for duplicates and suppression, stores event in database
+  </Step>
+  
+  <Step title="Dashboard updated">
+    Extension and dashboard APIs reflect new open count
+  </Step>
+</Steps>
+
+## Frequently asked questions
+
+<AccordionGroup>
+  <Accordion title="Why use a GIF instead of a PNG?">
+    GIF is the smallest image format for a 1x1 transparent pixel (43 bytes base64-encoded). It's widely supported and recognized as the standard for tracking pixels.
+  </Accordion>
+  
+  <Accordion title="Can recipients block tracking pixels?">
+    Yes. Email clients may:
+    - Block external images by default (requires user to "Load images")
+    - Proxy images through their servers (e.g., Gmail Image Proxy)
+    - Strip tracking pixels entirely
+    
+    Tracking relies on recipients loading images in their email client.
+  </Accordion>
+  
+  <Accordion title="What happens if the token is invalid?">
+    The server catches decoding errors and still returns a transparent GIF with a 200 status. Invalid requests are logged but don't create database records.
+    
+    ```typescript
+    // server/src/routes/track.ts:166-169
+    } catch (error) {
+      console.error("Tracking pixel processing failed:", error);
+    }
+    
+    // Still returns 200 + GIF
+    res.status(200).send(TRANSPARENT_PIXEL_GIF);
+    ```
+  </Accordion>
+  
+  <Accordion title="How does tracking work with Gmail's image proxy?">
+    Gmail proxies images through Google's servers (`googleimageproxy`). The tracker detects these requests by User-Agent and IP prefix:
+    
+    ```typescript
+    // server/src/routes/track.ts:10-11, 247-255
+    const GOOGLE_PROXY_UA_TOKEN = "googleimageproxy";
+    const GOOGLE_PROXY_IP_PREFIXES = ["66.249.", "64.233.", "74.125."];
+    
+    function isGoogleImageProxyHit(userAgent, ipAddress): boolean {
+      const ua = String(userAgent || "").toLowerCase();
+      if (!ua.includes(GOOGLE_PROXY_UA_TOKEN)) {
+        return false;
+      }
+      const ip = normalizeIp(ipAddress);
+      return GOOGLE_PROXY_IP_PREFIXES.some((prefix) => ip.startsWith(prefix));
+    }
+    ```
+    
+    The system also measures latency between sender suppression signals and proxy hits for debugging.
+  </Accordion>
+  
+  <Accordion title="What data is stored for each open?">
+    Each open event stores:
+    - `email_id`, `user_id`, `recipient` (from token)
+    - `opened_at` (timestamp)
+    - `ip_address`, `user_agent` (from request)
+    - `geo_country`, `geo_region`, `geo_city`, `latitude`, `longitude` (from GeoIP)
+    - `device_type` (currently always 'other')
+    - `is_duplicate`, `is_sender_suppressed`, `suppression_reason` (flags)
+    
+    See [Dashboard analytics](/features/dashboard-analytics) for query details.
+  </Accordion>
+</AccordionGroup>
+
+## Related features
+
+<CardGroup cols={2}>
+  <Card title="Sender suppression" icon="user-slash" href="/features/sender-suppression">
+    Learn how identity-based suppression prevents counting sender self-opens
+  </Card>
+  
+  <Card title="Deduplication" icon="filter" href="/features/deduplication">
+    Understand how duplicate opens are detected and filtered
+  </Card>
+  
+  <Card title="Dashboard analytics" icon="chart-line" href="/features/dashboard-analytics">
+    Explore dashboard APIs and analytics features
+  </Card>
+</CardGroup>

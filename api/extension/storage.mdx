@@ -1,0 +1,278 @@
+---
+title: Storage keys
+description: Chrome storage keys used by the Email Tracker extension
+---
+
+The Email Tracker extension uses Chrome's local storage API (`chrome.storage.local`) to persist configuration and tracking data. All storage keys are defined in `serviceWorker.js:1-6`.
+
+## Storage key constants
+
+```javascript
+const STORAGE_KEYS = {
+  USER_ID: "tracker_user_id",
+  TRACKER_BASE_URL: "tracker_base_url",
+  RECENT_EMAILS: "recent_tracked_emails",
+  DASHBOARD_TOKEN: "dashboard_token"
+};
+```
+
+## tracker_user_id
+
+Stores a unique identifier for the extension user.
+
+<ParamField path="type" type="string">
+  UUID v4 format
+</ParamField>
+
+<ParamField path="generated" type="when">
+  Auto-generated on first use via `crypto.randomUUID()`
+</ParamField>
+
+<ParamField path="persistence" type="string">
+  Permanent - set once and persists across sessions
+</ParamField>
+
+### Usage
+
+The user ID is automatically generated and stored when the extension is installed or when `ensureUserId()` is first called:
+
+```javascript
+async function ensureUserId() {
+  const { [STORAGE_KEYS.USER_ID]: existingUserId } = await chrome.storage.local.get(STORAGE_KEYS.USER_ID);
+  if (existingUserId) return existingUserId;
+
+  const newUserId = crypto.randomUUID();
+  await chrome.storage.local.set({ [STORAGE_KEYS.USER_ID]: newUserId });
+  return newUserId;
+}
+```
+
+This user ID is included in every tracking token to identify which user's extension generated the tracking pixel.
+
+## tracker_base_url
+
+Stores the base URL of the tracking server.
+
+<ParamField path="type" type="string">
+  HTTP/HTTPS URL
+</ParamField>
+
+<ParamField path="default" type="string">
+  `"https://email-tracker.duckdns.org"`
+</ParamField>
+
+<ParamField path="validation" type="string">
+  Must start with `http://` or `https://`, trailing slashes are automatically removed
+</ParamField>
+
+### Usage
+
+Set automatically on extension installation:
+
+```javascript
+chrome.runtime.onInstalled.addListener(async () => {
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.TRACKER_BASE_URL]: DEFAULT_TRACKER_BASE_URL
+  });
+
+  await ensureUserId();
+});
+```
+
+The URL is normalized before storage:
+
+```javascript
+function normalizeBaseUrl(url) {
+  const normalized = String(url || "").trim();
+  if (!normalized) {
+    return DEFAULT_TRACKER_BASE_URL;
+  }
+
+  if (!/^https?:\/\//i.test(normalized)) {
+    throw new Error("Tracker URL must start with http:// or https://");
+  }
+
+  return normalized.replace(/\/+$/, "");
+}
+```
+
+### Updating
+
+Users can update the tracker base URL via the `tracker:updateTrackerBaseUrl` message type:
+
+```javascript
+chrome.runtime.sendMessage({
+  type: "tracker:updateTrackerBaseUrl",
+  baseUrl: "https://my-tracker.example.com"
+});
+```
+
+## recent_tracked_emails
+
+Stores an array of recently tracked emails for display in the popup and inbox badges.
+
+<ParamField path="type" type="array">
+  Array of email tracking objects
+</ParamField>
+
+<ParamField path="limit" type="number">
+  Maximum 100 emails (defined by `RECENT_LIMIT`)
+</ParamField>
+
+<ParamField path="order" type="string">
+  Most recent first (newest emails prepended to array)
+</ParamField>
+
+### Structure
+
+Each item in the array has the following structure:
+
+<ParamField path="emailId" type="string" required>
+  UUID of the tracked email
+</ParamField>
+
+<ParamField path="recipient" type="string">
+  Recipient email address. Defaults to `"unknown"`
+</ParamField>
+
+<ParamField path="senderEmail" type="string">
+  Sender email address. Defaults to empty string
+</ParamField>
+
+<ParamField path="subject" type="string">
+  Email subject line. Defaults to empty string
+</ParamField>
+
+<ParamField path="sentAt" type="string" required>
+  ISO 8601 timestamp of when the email was sent
+</ParamField>
+
+<ParamField path="pixelUrl" type="string" required>
+  URL to the tracking pixel
+</ParamField>
+
+### Usage
+
+Emails are appended to this array when tracked:
+
+```javascript
+async function appendRecentTrackedEmail(payload) {
+  if (!payload?.emailId) {
+    return;
+  }
+
+  const { [STORAGE_KEYS.RECENT_EMAILS]: existing = [] } = await chrome.storage.local.get(
+    STORAGE_KEYS.RECENT_EMAILS
+  );
+
+  const next = [
+    {
+      emailId: payload.emailId,
+      recipient: payload.recipient || "unknown",
+      senderEmail: payload.senderEmail || "",
+      subject: payload.subject || "",
+      sentAt: payload.sentAt,
+      pixelUrl: payload.pixelUrl
+    },
+    ...existing
+  ].slice(0, RECENT_LIMIT);
+
+  await chrome.storage.local.set({ [STORAGE_KEYS.RECENT_EMAILS]: next });
+}
+```
+
+The array is automatically trimmed to 100 items, removing the oldest entries when the limit is exceeded.
+
+### Enrichment
+
+When retrieved via `tracker:getInboxBadgeData`, the stored emails are enriched with live tracking data from the server:
+
+```javascript
+async function enrichRecentEmails(recentEmails, trackerBaseUrl, dashboardToken) {
+  // If no dashboard token, return emails with zero counts
+  if (!dashboardToken) {
+    return recentEmails.map((item) => ({
+      ...item,
+      totalOpenEvents: 0,
+      uniqueOpenCount: 0,
+      lastOpenedAt: null
+    }));
+  }
+
+  // Fetch live data from server and merge with stored emails
+  const response = await fetch(`${normalizedBaseUrl}/dashboard/api/emails`, {
+    headers: {
+      "X-Tracker-Token": dashboardToken
+    }
+  });
+  // ... merge logic
+}
+```
+
+## dashboard_token
+
+Stores the authentication token for the tracker dashboard API.
+
+<ParamField path="type" type="string">
+  Arbitrary string token
+</ParamField>
+
+<ParamField path="default" type="string">
+  Empty string (no token)
+</ParamField>
+
+<ParamField path="usage" type="string">
+  Sent as `X-Tracker-Token` header when fetching email tracking data
+</ParamField>
+
+### Usage
+
+The dashboard token is required to fetch tracking statistics from the server. Without it, all tracking data will show zero opens:
+
+```javascript
+const response = await fetch(`${trackerBaseUrl}/dashboard/api/emails`, {
+  headers: {
+    "X-Tracker-Token": dashboardToken
+  }
+});
+```
+
+### Updating
+
+Users can update the dashboard token via the `tracker:updateDashboardToken` message type:
+
+```javascript
+chrome.runtime.sendMessage({
+  type: "tracker:updateDashboardToken",
+  dashboardToken: "your-secret-token"
+});
+```
+
+## Reading storage values
+
+To read storage values from a content script or popup:
+
+```javascript
+const {
+  [STORAGE_KEYS.USER_ID]: userId,
+  [STORAGE_KEYS.TRACKER_BASE_URL]: trackerBaseUrl,
+  [STORAGE_KEYS.RECENT_EMAILS]: recentEmails = [],
+  [STORAGE_KEYS.DASHBOARD_TOKEN]: dashboardToken = ""
+} = await chrome.storage.local.get([
+  STORAGE_KEYS.USER_ID,
+  STORAGE_KEYS.TRACKER_BASE_URL,
+  STORAGE_KEYS.RECENT_EMAILS,
+  STORAGE_KEYS.DASHBOARD_TOKEN
+]);
+```
+
+## Writing storage values
+
+To write storage values:
+
+```javascript
+await chrome.storage.local.set({
+  [STORAGE_KEYS.TRACKER_BASE_URL]: "https://example.com",
+  [STORAGE_KEYS.DASHBOARD_TOKEN]: "new-token"
+});
+```

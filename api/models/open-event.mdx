@@ -1,0 +1,150 @@
+---
+title: OpenEvent
+description: Represents an individual email open event with device and location data
+---
+
+The `OpenEvent` interface represents a single email open event with detailed metadata including device information, geolocation, and duplicate/suppression status.
+
+## Fields
+
+<ResponseField name="id" type="number" required>
+  Auto-incrementing unique identifier for the open event. This is the primary key.
+</ResponseField>
+
+<ResponseField name="email_id" type="string" required>
+  Identifier for the tracked email that was opened. References the `email_id` from `TrackedEmail`.
+</ResponseField>
+
+<ResponseField name="user_id" type="string" required>
+  Identifier for the user or account that owns this tracking record. Used for data isolation.
+</ResponseField>
+
+<ResponseField name="recipient" type="string" required>
+  Email address of the recipient who opened the email.
+</ResponseField>
+
+<ResponseField name="opened_at" type="string" required>
+  ISO 8601 timestamp indicating when the email was opened. Format: `YYYY-MM-DDTHH:mm:ss.sssZ`
+</ResponseField>
+
+<ResponseField name="ip_address" type="string | null">
+  IP address from which the email was opened. May be `null` if the IP address could not be determined. IPv6-mapped IPv4 addresses are normalized to standard IPv4 format.
+</ResponseField>
+
+<ResponseField name="user_agent" type="string | null">
+  User agent string from the HTTP request. May be `null` if not provided. Used for device type detection and duplicate detection.
+</ResponseField>
+
+<ResponseField name="geo_country" type="string | null">
+  Country name derived from IP geolocation. May be `null` if geolocation lookup failed or IP address was not available.
+</ResponseField>
+
+<ResponseField name="geo_region" type="string | null">
+  Region or state name derived from IP geolocation. May be `null` if not available.
+</ResponseField>
+
+<ResponseField name="geo_city" type="string | null">
+  City name derived from IP geolocation. May be `null` if not available.
+</ResponseField>
+
+<ResponseField name="latitude" type="number | null">
+  Latitude coordinate from IP geolocation. May be `null` if not available.
+</ResponseField>
+
+<ResponseField name="longitude" type="number | null">
+  Longitude coordinate from IP geolocation. May be `null` if not available.
+</ResponseField>
+
+<ResponseField name="device_type" type="'phone' | 'computer' | 'other'" required>
+  Type of device used to open the email, detected from the user agent string:
+  - `phone` - Mobile devices and tablets
+  - `computer` - Desktop computers and laptops
+  - `other` - Unknown or unrecognized devices
+</ResponseField>
+
+<ResponseField name="is_duplicate" type="number" required>
+  Flag indicating whether this open was classified as a duplicate:
+  - `0` - Unique open event
+  - `1` - Duplicate open (same email opened multiple times from same IP/user agent within a time window)
+  
+  Duplicate opens are excluded from the `open_count` metric.
+</ResponseField>
+
+<ResponseField name="is_sender_suppressed" type="number" required>
+  Flag indicating whether this open was suppressed by the sender:
+  - `0` - Normal open event
+  - `1` - Suppressed open (sender called `mark-suppress-next` before the open occurred)
+  
+  Suppressed opens are typically from email client prefetching and are excluded from the `open_count` metric.
+</ResponseField>
+
+<ResponseField name="suppression_reason" type="string | null">
+  Reason for suppression if `is_sender_suppressed` is `1`. Currently, the only value is:
+  - `"mark_suppress_next"` - Suppressed via the mark-suppress-next endpoint
+  - `null` - Not suppressed
+</ResponseField>
+
+## Returned by
+
+- `GET /dashboard/api/open-events` - Returns an array of `OpenEvent` objects
+  - Without query params: Returns all non-duplicate, non-suppressed open events
+  - With `email_id` query param: Returns open events for a specific email
+
+## Database schema
+
+Stored in the `open_events` table with the following SQLite schema:
+
+```sql
+CREATE TABLE open_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+  ip_address TEXT,
+  user_agent TEXT,
+  geo_country TEXT,
+  geo_region TEXT,
+  geo_city TEXT,
+  latitude REAL,
+  longitude REAL,
+  device_type TEXT NOT NULL DEFAULT 'other' CHECK (device_type IN ('phone', 'computer', 'other')),
+  is_duplicate INTEGER NOT NULL DEFAULT 0 CHECK (is_duplicate IN (0, 1)),
+  is_sender_suppressed INTEGER NOT NULL DEFAULT 0 CHECK (is_sender_suppressed IN (0, 1)),
+  suppression_reason TEXT,
+  FOREIGN KEY (email_id) REFERENCES tracked_emails(email_id)
+);
+```
+
+## Example response
+
+```json
+{
+  "id": 42,
+  "email_id": "email_456",
+  "user_id": "user_123",
+  "recipient": "recipient@example.com",
+  "opened_at": "2024-01-15T10:35:00.000Z",
+  "ip_address": "203.0.113.42",
+  "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+  "geo_country": "United States",
+  "geo_region": "California",
+  "geo_city": "San Francisco",
+  "latitude": 37.7749,
+  "longitude": -122.4194,
+  "device_type": "phone",
+  "is_duplicate": 0,
+  "is_sender_suppressed": 0,
+  "suppression_reason": null
+}
+```
+
+## Related models
+
+- [TrackedEmail](/api/models/tracked-email) - Parent email record that open events belong to
+- [TrackingPayload](/api/models/tracking-payload) - Initial data used to create the tracking record
+
+## Related APIs
+
+- [Get open events](/api/dashboard-endpoints) - Retrieve open events for emails
+- [Mark suppress next](/api/suppression) - Suppress the next open event for an email

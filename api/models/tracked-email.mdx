@@ -1,0 +1,84 @@
+---
+title: TrackedEmail
+description: Represents a tracked email with aggregated open statistics
+---
+
+The `TrackedEmail` interface represents a tracked email record with aggregated open count statistics. This is the primary model for email tracking data stored in the database.
+
+## Fields
+
+<ResponseField name="email_id" type="string" required>
+  Unique identifier for the tracked email. This is the primary key and matches the `email_id` from the `TrackingPayload`.
+</ResponseField>
+
+<ResponseField name="user_id" type="string" required>
+  Unique identifier for the user or account that owns this tracked email. Used for data isolation and multi-tenant filtering.
+</ResponseField>
+
+<ResponseField name="recipient" type="string" required>
+  Email address of the recipient who received this email.
+</ResponseField>
+
+<ResponseField name="sender_email" type="string | null">
+  Email address of the sender. This field may be `null` if not provided when creating the tracking record.
+</ResponseField>
+
+<ResponseField name="sent_at" type="string" required>
+  ISO 8601 timestamp indicating when the email was sent. Format: `YYYY-MM-DDTHH:mm:ss.sssZ`
+</ResponseField>
+
+<ResponseField name="open_count" type="number" required>
+  Number of unique, counted opens for this email. This count excludes:
+  - Duplicate opens (detected by IP address, user agent, and timing)
+  - Sender-suppressed opens (opens prevented by `mark-suppress-next`)
+  
+  This is the primary metric for tracking genuine recipient engagement.
+</ResponseField>
+
+<ResponseField name="created_at" type="string" required>
+  ISO 8601 timestamp indicating when this tracking record was created in the database. Automatically set to the current time when the record is inserted.
+</ResponseField>
+
+## Returned by
+
+- `GET /dashboard/api/emails` - Returns an array of `TrackedEmail` objects with additional computed fields:
+  - `unique_open_count` - Same as `open_count`
+  - `total_open_events` - Total counted opens (non-duplicate, non-suppressed)
+  - `raw_open_events` - Total raw opens including duplicates and suppressed
+  - `last_opened_at` - Timestamp of the most recent counted open
+  - `opened` - Boolean indicating if the email has been opened
+
+## Database schema
+
+Stored in the `tracked_emails` table with the following SQLite schema:
+
+```sql
+CREATE TABLE tracked_emails (
+  email_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  sender_email TEXT,
+  sent_at TEXT NOT NULL,
+  open_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+## Example response
+
+```json
+{
+  "email_id": "email_456",
+  "user_id": "user_123",
+  "recipient": "recipient@example.com",
+  "sender_email": "sender@example.com",
+  "sent_at": "2024-01-15T10:30:00.000Z",
+  "open_count": 3,
+  "created_at": "2024-01-15T10:30:00.000Z"
+}
+```
+
+## Related models
+
+- [TrackingPayload](/api/models/tracking-payload) - Input data used to create tracked emails
+- [OpenEvent](/api/models/open-event) - Individual open events associated with tracked emails

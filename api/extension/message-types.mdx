@@ -1,0 +1,290 @@
+---
+title: Message types
+description: Chrome extension message types for communication between content scripts and the service worker
+---
+
+The Email Tracker extension uses Chrome's message passing API to communicate between content scripts and the service worker. All messages follow a request/response pattern using `chrome.runtime.sendMessage`.
+
+## tracker:getComposeTrackingData
+
+Generates tracking data for a new email being composed. This message is sent when a user is about to send an email in Gmail.
+
+### Request
+
+<ParamField path="type" type="string" required>
+  Must be `"tracker:getComposeTrackingData"`
+</ParamField>
+
+<ParamField path="recipient" type="string">
+  Email address(es) of the recipient(s). Defaults to `"unknown"` if not provided.
+</ParamField>
+
+<ParamField path="senderEmail" type="string">
+  Email address of the sender. Optional and defaults to empty string if not provided.
+</ParamField>
+
+### Response
+
+<ParamField path="ok" type="boolean">
+  Indicates if the request was successful
+</ParamField>
+
+<ParamField path="userId" type="string">
+  Unique identifier for the user
+</ParamField>
+
+<ParamField path="emailId" type="string">
+  Generated UUID for this email
+</ParamField>
+
+<ParamField path="sentAt" type="string">
+  ISO 8601 timestamp of when the tracking data was generated
+</ParamField>
+
+<ParamField path="recipient" type="string">
+  Recipient email address (trimmed)
+</ParamField>
+
+<ParamField path="senderEmail" type="string | null">
+  Sender email address (trimmed and lowercased) or null
+</ParamField>
+
+<ParamField path="token" type="string">
+  Encoded tracking token containing the tracking payload
+</ParamField>
+
+<ParamField path="pixelUrl" type="string">
+  Complete URL to the tracking pixel image
+</ParamField>
+
+<ParamField path="baseUrl" type="string">
+  Base URL of the tracker server
+</ParamField>
+
+### Example
+
+```javascript
+const response = await chrome.runtime.sendMessage({
+  type: "tracker:getComposeTrackingData",
+  recipient: "user@example.com",
+  senderEmail: "sender@example.com"
+});
+
+if (response?.ok) {
+  const img = document.createElement("img");
+  img.src = response.pixelUrl;
+  img.width = 1;
+  img.height = 1;
+  // Append to email body
+}
+```
+
+## tracker:logTrackedEmail
+
+Logs a tracked email to local storage for display in the popup and inbox badges.
+
+### Request
+
+<ParamField path="type" type="string" required>
+  Must be `"tracker:logTrackedEmail"`
+</ParamField>
+
+<ParamField path="payload" type="object" required>
+  Email tracking data to log
+</ParamField>
+
+<ParamField path="payload.emailId" type="string" required>
+  UUID of the tracked email
+</ParamField>
+
+<ParamField path="payload.recipient" type="string">
+  Recipient email address. Defaults to `"unknown"`
+</ParamField>
+
+<ParamField path="payload.senderEmail" type="string">
+  Sender email address. Defaults to empty string
+</ParamField>
+
+<ParamField path="payload.subject" type="string">
+  Email subject line. Defaults to empty string
+</ParamField>
+
+<ParamField path="payload.sentAt" type="string" required>
+  ISO 8601 timestamp of when the email was sent
+</ParamField>
+
+<ParamField path="payload.pixelUrl" type="string" required>
+  URL to the tracking pixel
+</ParamField>
+
+### Response
+
+<ParamField path="ok" type="boolean">
+  Indicates if the request was successful
+</ParamField>
+
+### Example
+
+```javascript
+chrome.runtime.sendMessage({
+  type: "tracker:logTrackedEmail",
+  payload: {
+    emailId: response.emailId,
+    recipient: response.recipient,
+    senderEmail: response.senderEmail || "",
+    subject: "Meeting Tomorrow",
+    sentAt: response.sentAt,
+    pixelUrl: response.pixelUrl
+  }
+});
+```
+
+## tracker:getInboxBadgeData
+
+Retrieves enriched tracking data for recent emails to display badges in the Gmail inbox.
+
+### Request
+
+<ParamField path="type" type="string" required>
+  Must be `"tracker:getInboxBadgeData"`
+</ParamField>
+
+### Response
+
+<ParamField path="ok" type="boolean">
+  Indicates if the request was successful
+</ParamField>
+
+<ParamField path="trackerBaseUrl" type="string">
+  Base URL of the tracker server
+</ParamField>
+
+<ParamField path="items" type="array">
+  Array of enriched email tracking data
+</ParamField>
+
+<ParamField path="items[].emailId" type="string">
+  UUID of the tracked email
+</ParamField>
+
+<ParamField path="items[].recipient" type="string">
+  Recipient email address
+</ParamField>
+
+<ParamField path="items[].senderEmail" type="string">
+  Sender email address
+</ParamField>
+
+<ParamField path="items[].subject" type="string">
+  Email subject line
+</ParamField>
+
+<ParamField path="items[].sentAt" type="string">
+  ISO 8601 timestamp of when the email was sent
+</ParamField>
+
+<ParamField path="items[].pixelUrl" type="string">
+  URL to the tracking pixel
+</ParamField>
+
+<ParamField path="items[].totalOpenEvents" type="number">
+  Total number of open events for this email
+</ParamField>
+
+<ParamField path="items[].uniqueOpenCount" type="number">
+  Number of unique opens (deduplicated)
+</ParamField>
+
+<ParamField path="items[].lastOpenedAt" type="string | null">
+  ISO 8601 timestamp of the last open event, or null if never opened
+</ParamField>
+
+### Example
+
+```javascript
+const response = await chrome.runtime.sendMessage({
+  type: "tracker:getInboxBadgeData"
+});
+
+if (response?.ok && Array.isArray(response.items)) {
+  response.items.forEach(item => {
+    console.log(`Email ${item.emailId}: ${item.totalOpenEvents} opens`);
+  });
+}
+```
+
+## tracker:markSuppressNext
+
+Marks an email to suppress the next open event. This is used when the sender views their own sent email to avoid tracking themselves.
+
+### Request
+
+<ParamField path="type" type="string" required>
+  Must be `"tracker:markSuppressNext"`
+</ParamField>
+
+<ParamField path="emailId" type="string" required>
+  UUID of the email to mark for suppression
+</ParamField>
+
+### Response
+
+<ParamField path="ok" type="boolean">
+  Indicates if the request was successful
+</ParamField>
+
+<ParamField path="sent" type="boolean">
+  Whether the suppression request was successfully sent to the server
+</ParamField>
+
+<ParamField path="reason" type="string">
+  Status message: `"ok"` on success, error description on failure
+</ParamField>
+
+### Example
+
+```javascript
+const response = await chrome.runtime.sendMessage({
+  type: "tracker:markSuppressNext",
+  emailId: "550e8400-e29b-41d4-a716-446655440000"
+});
+
+if (response?.ok && response.sent) {
+  console.log("Suppression marked successfully");
+}
+```
+
+## Implementation details
+
+All message handlers are implemented in `serviceWorker.js:19-116`. The service worker uses an async IIFE pattern with `sendResponse` and returns `true` to indicate asynchronous response handling:
+
+```javascript
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  (async () => {
+    if (message?.type === "tracker:getComposeTrackingData") {
+      const userId = await ensureUserId();
+      const emailId = crypto.randomUUID();
+      const sentAt = new Date().toISOString();
+      const recipient = (message.recipient || "unknown").trim();
+      const senderEmail = String(message.senderEmail || "").trim().toLowerCase() || null;
+      const baseUrl = await getTrackerBaseUrl();
+      const token = encodeTrackingToken({
+        user_id: userId,
+        email_id: emailId,
+        recipient,
+        sender_email: senderEmail ?? undefined,
+        sent_at: sentAt
+      });
+      const pixelUrl = `${baseUrl}/t/${token}.gif`;
+
+      sendResponse({ ok: true, userId, emailId, sentAt, recipient, senderEmail, token, pixelUrl, baseUrl });
+      return;
+    }
+    // ... other handlers
+  })().catch((error) => {
+    sendResponse({ ok: false, error: String(error?.message || error) });
+  });
+
+  return true;
+});
+```

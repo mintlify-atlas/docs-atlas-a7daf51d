@@ -1,0 +1,160 @@
+---
+title: Self-hosting guide
+description: Configure and deploy Email Tracker on your own infrastructure
+---
+
+Email Tracker is designed to be self-hosted, giving you full control over your tracking data and infrastructure.
+
+## What you need to configure
+
+When self-hosting Email Tracker, you need to set up:
+
+1. **Your own domain** (recommended) or host/IP
+2. **HTTPS reverse proxy** for production email clients
+3. **Server port** (`PORT` environment variable)
+4. **Strong dashboard token** (`DASHBOARD_TOKEN` environment variable)
+5. **Extension configuration** (tracker URL + dashboard token in popup)
+
+This is the minimum configuration for a working deployment.
+
+## Server environment variables
+
+### Required variables
+
+<ParamField path="DASHBOARD_TOKEN" type="string" required>
+  Secret token for authenticating dashboard API requests. Keep this private and use a strong random value.
+</ParamField>
+
+### Optional variables
+
+<ParamField path="PORT" type="number" default="8080">
+  Port for the Node.js server to listen on. Use `127.0.0.1:PORT` when running behind a reverse proxy.
+</ParamField>
+
+<ParamField path="DB_PATH" type="string" default="server/data/tracker.db">
+  Path to the SQLite database file.
+</ParamField>
+
+<ParamField path="DEDUP_WINDOW_MS" type="number" default="30000">
+  Deduplication window in milliseconds. Opens within this window from the same source are treated as duplicates.
+</ParamField>
+
+## Extension configuration
+
+After loading the Chrome extension, configure it through the popup:
+
+1. **Tracker Base URL**
+   - For local development: `http://localhost:8090`
+   - For production: Your HTTPS domain (e.g., `https://tracker.yourdomain.com`)
+
+2. **Dashboard Token**
+   - Must match the `DASHBOARD_TOKEN` environment variable on your server
+
+## Operational recommendations
+
+### Process management
+
+Run the server with a process manager to ensure it stays running:
+
+<Tabs>
+  <Tab title="systemd">
+    Create a systemd service file at `/etc/systemd/system/email-tracker.service`:
+
+    ```ini
+    [Unit]
+    Description=Email Tracker Server
+    After=network.target
+
+    [Service]
+    Type=simple
+    User=your-user
+    WorkingDirectory=/path/to/email-tracker
+    Environment="PORT=8090"
+    Environment="DASHBOARD_TOKEN=your-secure-token"
+    ExecStart=/usr/bin/npm --workspace=server run start
+    Restart=always
+
+    [Install]
+    WantedBy=multi-user.target
+    ```
+
+    Enable and start the service:
+
+    ```bash
+    sudo systemctl enable email-tracker
+    sudo systemctl start email-tracker
+    ```
+  </Tab>
+  <Tab title="pm2">
+    Install pm2 globally:
+
+    ```bash
+    npm install -g pm2
+    ```
+
+    Start the server:
+
+    ```bash
+    PORT=8090 DASHBOARD_TOKEN=your-secure-token pm2 start npm --name email-tracker -- --workspace=server run start
+    ```
+
+    Save the pm2 configuration:
+
+    ```bash
+    pm2 save
+    pm2 startup
+    ```
+  </Tab>
+</Tabs>
+
+### Database backups
+
+Regularly back up your SQLite database file to prevent data loss:
+
+```bash
+# Create a backup with timestamp
+cp server/data/tracker.db server/data/tracker.db.$(date +%Y%m%d_%H%M%S)
+
+# Or use SQLite's backup command for a consistent snapshot
+sqlite3 server/data/tracker.db ".backup 'tracker-backup.db'"
+```
+
+Consider setting up automated backups with a cron job:
+
+```bash
+# Run daily at 2 AM
+0 2 * * * cd /path/to/email-tracker && sqlite3 server/data/tracker.db ".backup 'backups/tracker-$(date +\%Y\%m\%d).db'"
+```
+
+### Log rotation
+
+Monitor disk usage and rotate logs regularly:
+
+- If using systemd, logs are automatically managed by journald
+- If using pm2, configure log rotation:
+
+```bash
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:max_size 10M
+pm2 set pm2-logrotate:retain 7
+```
+
+### Security best practices
+
+<Warning>
+  Keep your `DASHBOARD_TOKEN` private. Anyone with this token can access your tracking dashboard and analytics data.
+</Warning>
+
+- Use a strong, randomly generated `DASHBOARD_TOKEN`
+- Never commit the token to version control
+- Use environment variables or a secrets management system
+- Regularly rotate the token and update your extension configuration
+
+## Storage considerations
+
+The SQLite database stores:
+
+- **tracked_emails**: Email metadata and open counts
+- **open_events**: Individual open events with IP, User-Agent, and GeoIP data
+
+Disk usage grows with the number of tracked emails and opens. Monitor the database size and consider implementing data retention policies if needed.

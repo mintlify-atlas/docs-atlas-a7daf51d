@@ -1,0 +1,362 @@
+---
+title: Suppression
+description: Control sender suppression signals and monitor Gmail proxy behavior
+---
+
+The suppression system allows you to mark the next open event for a specific email as sender-suppressed. This is useful for handling Gmail's image proxy behavior, where Gmail pre-fetches images before the user actually opens the email.
+
+## Mark suppress next
+
+```
+POST /mark-suppress-next
+```
+
+Mark the next open event for a specific email ID as sender-suppressed. The suppression signal is consumed on the next pixel hit for that email.
+
+### Request body
+
+<ParamField body="email_id" type="string" required>
+  The email ID to mark for suppression. Must match the `email_id` in the tracking token.
+</ParamField>
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  Indicates whether the request was successful
+</ResponseField>
+
+<ResponseField name="email_id" type="string">
+  The email ID that was marked for suppression (only present on success)
+</ResponseField>
+
+<ResponseField name="recorded_at_ms" type="number">
+  Unix timestamp in milliseconds when the suppression signal was recorded (only present on success)
+</ResponseField>
+
+<ResponseField name="error" type="string">
+  Error message (only present on failure)
+</ResponseField>
+
+### Example request
+
+```bash
+curl -X POST http://localhost:8080/mark-suppress-next \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email_id": "email_123"
+  }'
+```
+
+### Example response (success)
+
+```json
+{
+  "ok": true,
+  "email_id": "email_123",
+  "recorded_at_ms": 1709460000000
+}
+```
+
+### Example response (error)
+
+```json
+{
+  "ok": false,
+  "error": "email_id is required"
+}
+```
+
+## How suppression works
+
+1. **Send suppression signal**: Call `/mark-suppress-next` with the email ID before Gmail's proxy fetches the image
+2. **Consume-once semantics**: The suppression signal is consumed on the next pixel hit for that email
+3. **TTL fallback**: Unused signals expire after 10 seconds (configurable)
+4. **Latency tracking**: When a Gmail proxy hit consumes a signal, the latency is recorded
+
+### Example workflow
+
+```typescript
+// 1. Send email with tracking pixel
+const token = encodeTrackingToken({
+  email_id: "email_123",
+  user_id: "user_456",
+  recipient: "user@gmail.com",
+  sender_email: "sender@example.com",
+  sent_at: new Date().toISOString()
+});
+
+// 2. Mark the next open as suppressed (Gmail proxy will trigger this)
+await fetch("http://localhost:8080/mark-suppress-next", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ email_id: "email_123" })
+});
+
+// 3. Gmail proxy fetches the pixel (automatically suppressed)
+// 4. User opens email (counted as real open)
+```
+
+## Suppression configuration
+
+The suppression system has the following limits:
+
+- **TTL**: 10,000ms (10 seconds) - Suppression signals expire if not consumed
+- **Map limit**: 10,000 active email IDs - Oldest entries are evicted when limit is reached
+- **Event limit**: 5,000 debug events retained for monitoring
+
+## Metrics endpoints
+
+The following endpoints provide monitoring and debugging information for the suppression system. These endpoints do not require authentication.
+
+### Gmail proxy latency
+
+```
+GET /metrics/gmail-proxy-latency
+```
+
+Retrieve latency statistics for Gmail proxy requests that consumed suppression signals.
+
+#### Response
+
+<ResponseField name="count" type="number">
+  Number of latency samples collected
+</ResponseField>
+
+<ResponseField name="min" type="number | null">
+  Minimum latency in milliseconds
+</ResponseField>
+
+<ResponseField name="max" type="number | null">
+  Maximum latency in milliseconds
+</ResponseField>
+
+<ResponseField name="avg" type="number | null">
+  Average latency in milliseconds
+</ResponseField>
+
+<ResponseField name="p50" type="number | null">
+  50th percentile (median) latency
+</ResponseField>
+
+<ResponseField name="p90" type="number | null">
+  90th percentile latency
+</ResponseField>
+
+<ResponseField name="p95" type="number | null">
+  95th percentile latency
+</ResponseField>
+
+<ResponseField name="p99" type="number | null">
+  99th percentile latency
+</ResponseField>
+
+#### Example request
+
+```bash
+curl http://localhost:8080/metrics/gmail-proxy-latency
+```
+
+#### Example response
+
+```json
+{
+  "count": 42,
+  "min": 120,
+  "max": 850,
+  "avg": 324.5,
+  "p50": 310,
+  "p90": 520,
+  "p95": 620,
+  "p99": 800
+}
+```
+
+### Suppress signals
+
+```
+GET /metrics/suppress-signals
+```
+
+Retrieve suppression signal statistics and recent events.
+
+#### Response
+
+<ResponseField name="count" type="number">
+  Total number of suppression signals received (lifetime counter)
+</ResponseField>
+
+<ResponseField name="active_email_ids" type="number">
+  Number of email IDs currently in the suppression map
+</ResponseField>
+
+<ResponseField name="ttl_ms" type="number">
+  Time-to-live for suppression signals in milliseconds
+</ResponseField>
+
+<ResponseField name="recent" type="array">
+  Array of recent suppression debug events
+
+  <ResponseField name="event" type="string">
+    Event type: `mark_suppress_next`, `google_proxy_hit`, `suppression_consumed`, or `suppression_expired`
+  </ResponseField>
+
+  <ResponseField name="email_id" type="string">
+    Email ID associated with the event
+  </ResponseField>
+
+  <ResponseField name="at_ms" type="number">
+    Unix timestamp in milliseconds when the event occurred
+  </ResponseField>
+
+  <ResponseField name="ip" type="string">
+    IP address (normalized)
+  </ResponseField>
+
+  <ResponseField name="user_agent" type="string">
+    User agent string
+  </ResponseField>
+
+  <ResponseField name="delta_ms" type="number">
+    Time between suppression signal and consumption (only for consumed/proxy events)
+  </ResponseField>
+
+  <ResponseField name="pending_suppression" type="boolean">
+    Whether a suppression signal was pending (only for proxy events)
+  </ResponseField>
+</ResponseField>
+
+#### Example request
+
+```bash
+curl http://localhost:8080/metrics/suppress-signals
+```
+
+#### Example response
+
+```json
+{
+  "count": 127,
+  "active_email_ids": 3,
+  "ttl_ms": 10000,
+  "recent": [
+    {
+      "event": "mark_suppress_next",
+      "email_id": "email_123",
+      "at_ms": 1709460000000,
+      "ip": "192.168.1.1",
+      "user_agent": "EmailClient/1.0"
+    },
+    {
+      "event": "google_proxy_hit",
+      "email_id": "email_123",
+      "at_ms": 1709460000350,
+      "ip": "66.249.64.10",
+      "user_agent": "Mozilla/5.0 (Windows NT 5.1; rv:11.0) Gecko Firefox/11.0 (via googleimageproxy)",
+      "pending_suppression": true,
+      "delta_ms": 350
+    },
+    {
+      "event": "suppression_consumed",
+      "email_id": "email_123",
+      "at_ms": 1709460000350,
+      "ip": "66.249.64.10",
+      "user_agent": "Mozilla/5.0 (Windows NT 5.1; rv:11.0) Gecko Firefox/11.0 (via googleimageproxy)",
+      "delta_ms": 350
+    }
+  ]
+}
+```
+
+### Suppression debug
+
+```
+GET /metrics/suppression-debug
+```
+
+Retrieve detailed suppression event data grouped by email ID.
+
+#### Response
+
+<ResponseField name="active_email_ids" type="number">
+  Number of email IDs currently in the suppression map
+</ResponseField>
+
+<ResponseField name="ttl_ms" type="number">
+  Time-to-live for suppression signals in milliseconds
+</ResponseField>
+
+<ResponseField name="recent_events" type="array">
+  Array of all recent suppression debug events (same structure as `suppress-signals` endpoint)
+</ResponseField>
+
+<ResponseField name="by_email" type="object">
+  Events grouped by email ID
+
+  <ResponseField name="[email_id]" type="object">
+    <ResponseField name="marks" type="number[]">
+      Array of timestamps when suppression was marked
+    </ResponseField>
+
+    <ResponseField name="google_proxy_hits" type="number[]">
+      Array of timestamps for Google proxy hits
+    </ResponseField>
+
+    <ResponseField name="consumed" type="number[]">
+      Array of timestamps when suppression was consumed
+    </ResponseField>
+
+    <ResponseField name="expired" type="number[]">
+      Array of timestamps when suppression expired
+    </ResponseField>
+  </ResponseField>
+</ResponseField>
+
+#### Example request
+
+```bash
+curl http://localhost:8080/metrics/suppression-debug
+```
+
+#### Example response
+
+```json
+{
+  "active_email_ids": 2,
+  "ttl_ms": 10000,
+  "recent_events": [
+    {
+      "event": "mark_suppress_next",
+      "email_id": "email_123",
+      "at_ms": 1709460000000,
+      "ip": "192.168.1.1",
+      "user_agent": "EmailClient/1.0"
+    }
+  ],
+  "by_email": {
+    "email_123": {
+      "marks": [1709460000000],
+      "google_proxy_hits": [1709460000350],
+      "consumed": [1709460000350],
+      "expired": []
+    },
+    "email_456": {
+      "marks": [1709460005000],
+      "google_proxy_hits": [],
+      "consumed": [],
+      "expired": [1709460015000]
+    }
+  }
+}
+```
+
+## Gmail proxy detection
+
+The server automatically detects Gmail proxy requests using:
+
+- **User-Agent**: Contains `googleimageproxy`
+- **IP ranges**: Matches known Google proxy prefixes:
+  - `66.249.*`
+  - `64.233.*`
+  - `74.125.*`
+
+When both conditions are met, the request is flagged as a Gmail proxy hit and latency metrics are recorded if a suppression signal exists.

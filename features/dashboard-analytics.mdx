@@ -1,0 +1,653 @@
+---
+title: Dashboard analytics
+description: Explore dashboard APIs, badge system, GeoIP enrichment, and analytics features
+---
+
+## Dashboard overview
+
+The Email Tracker dashboard provides a web interface and REST APIs for viewing tracked emails and open events.
+
+**Key features:**
+- View all tracked emails with open counts
+- Filter open events by email
+- GeoIP enrichment (country, region, city, coordinates)
+- Token-based authentication
+- Inbox badge system in Gmail
+
+## Authentication
+
+Dashboard APIs require a token passed via the `X-Tracker-Token` header.
+
+### Setting dashboard token
+
+Configure the token via environment variable:
+
+```bash
+DASHBOARD_TOKEN=your-secret-token-here npm --workspace=server run start
+```
+
+### Token validation
+
+```typescript
+// server/src/routes/dashboard.ts:143-150
+function isAuthorized(incomingToken: string | undefined): boolean {
+  const expectedToken = process.env.DASHBOARD_TOKEN;
+  if (!expectedToken) {
+    return false;
+  }
+
+  return incomingToken === expectedToken;
+}
+```
+
+<Warning>
+  All dashboard API requests return `401 Unauthorized` if:
+  - `DASHBOARD_TOKEN` is not set
+  - `X-Tracker-Token` header is missing
+  - Token does not match
+</Warning>
+
+## Dashboard APIs
+
+### Get tracked emails
+
+Returns all tracked emails with aggregated open statistics.
+
+**Endpoint:** `GET /dashboard/api/emails`
+
+**Headers:**
+```
+X-Tracker-Token: your-dashboard-token
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "items": [
+    {
+      "email_id": "abc-123",
+      "user_id": "user-456",
+      "recipient": "recipient@example.com",
+      "sender_email": "sender@example.com",
+      "sent_at": "2024-03-15T10:30:00.000Z",
+      "unique_open_count": 3,
+      "total_open_events": 3,
+      "raw_open_events": 8,
+      "last_opened_at": "2024-03-15T11:45:00.000Z",
+      "opened": true,
+      "created_at": "2024-03-15T10:30:00.000Z"
+    }
+  ]
+}
+```
+
+**Field descriptions:**
+
+| Field | Description |
+|-------|-------------|
+| `email_id` | Unique message identifier |
+| `user_id` | User who sent the message |
+| `recipient` | Recipient email address(es) |
+| `sender_email` | Sender email (for suppression) |
+| `sent_at` | ISO timestamp when email was sent |
+| `unique_open_count` | Count of non-duplicate, non-suppressed opens (from `tracked_emails.open_count`) |
+| `total_open_events` | Count of opens excluding duplicates/suppression (calculated from `open_events`) |
+| `raw_open_events` | Total pixel hits including duplicates/suppression |
+| `last_opened_at` | Timestamp of most recent non-duplicate, non-suppressed open |
+| `opened` | Boolean: `unique_open_count > 0` |
+| `created_at` | Timestamp when tracking record was created |
+
+### SQL query
+
+The emails endpoint uses a complex JOIN to aggregate open statistics:
+
+```sql
+-- server/src/routes/dashboard.ts:45-68
+SELECT
+  te.email_id,
+  te.user_id,
+  te.recipient,
+  te.sender_email,
+  te.sent_at,
+  te.open_count AS unique_open_count,
+  COALESCE(oe.total_open_events, 0) AS total_open_events,
+  COALESCE(oe.raw_open_events, 0) AS raw_open_events,
+  oe.last_opened_at,
+  te.created_at
+FROM tracked_emails te
+LEFT JOIN (
+  SELECT
+    email_id,
+    COUNT(*) AS raw_open_events,
+    SUM(CASE WHEN is_duplicate = 0 AND IFNULL(is_sender_suppressed, 0) = 0 THEN 1 ELSE 0 END) AS total_open_events,
+    MAX(CASE WHEN is_duplicate = 0 AND IFNULL(is_sender_suppressed, 0) = 0 THEN opened_at ELSE NULL END) AS last_opened_at
+  FROM open_events
+  GROUP BY email_id
+) oe ON oe.email_id = te.email_id
+ORDER BY datetime(te.created_at) DESC
+```
+
+<Note>
+  The query distinguishes between:
+  - `raw_open_events`: All pixel hits (including duplicates/suppression)
+  - `total_open_events`: Only counted opens (`is_duplicate = 0 AND is_sender_suppressed = 0`)
+  - `unique_open_count`: From `tracked_emails.open_count` (incremented by `openRecorder`)
+</Note>
+
+### Get open events
+
+Returns open event history, optionally filtered by `email_id`.
+
+**Endpoint:** `GET /dashboard/api/open-events?email_id=<email_id>`
+
+**Headers:**
+```
+X-Tracker-Token: your-dashboard-token
+```
+
+**Query parameters:**
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `email_id` | No | Filter events for a specific email |
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "items": [
+    {
+      "id": 123,
+      "email_id": "abc-123",
+      "user_id": "user-456",
+      "recipient": "recipient@example.com",
+      "opened_at": "2024-03-15T10:35:00.000Z",
+      "ip_address": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
+      "geo_country": "US",
+      "geo_region": "CA",
+      "geo_city": "San Francisco",
+      "latitude": 37.7749,
+      "longitude": -122.4194,
+      "device_type": "other",
+      "is_duplicate": 0,
+      "is_sender_suppressed": 0,
+      "suppression_reason": null
+    }
+  ]
+}
+```
+
+### SQL query
+
+The open events endpoint filters out duplicates and suppressed events:
+
+```sql
+-- server/src/routes/dashboard.ts:70-91
+SELECT
+  id,
+  email_id,
+  user_id,
+  recipient,
+  opened_at,
+  ip_address,
+  user_agent,
+  geo_country,
+  geo_region,
+  geo_city,
+  latitude,
+  longitude,
+  device_type,
+  is_duplicate,
+  is_sender_suppressed,
+  suppression_reason
+FROM open_events
+WHERE is_duplicate = 0
+  AND IFNULL(is_sender_suppressed, 0) = 0
+[AND email_id = ?]  -- if email_id query param provided
+ORDER BY datetime(opened_at) DESC
+```
+
+<Note>
+  To view **all** events (including duplicates/suppression), query the database directly or modify the SQL filter.
+</Note>
+
+## GeoIP enrichment
+
+The tracker enriches open events with geographic location data using the `geoip-lite` library.
+
+### GeoIP service
+
+```typescript
+// server/src/services/geoip.ts:11-30
+export function resolveGeoFromIp(ipAddress: string | null): GeoDetails {
+  if (!ipAddress) {
+    return emptyGeo();
+  }
+
+  const normalized = normalizeIp(ipAddress);
+  const match = geoip.lookup(normalized);
+
+  if (!match) {
+    return emptyGeo();
+  }
+
+  return {
+    geo_country: match.country ?? null,
+    geo_region: match.region ?? null,
+    geo_city: match.city ?? null,
+    latitude: Array.isArray(match.ll) ? (match.ll[0] ?? null) : null,
+    longitude: Array.isArray(match.ll) ? (match.ll[1] ?? null) : null
+  };
+}
+```
+
+### IP normalization
+
+IPv6-mapped IPv4 addresses are unwrapped:
+
+```typescript
+// server/src/services/geoip.ts:32-40
+function normalizeIp(value: string): string {
+  const ip = value.trim();
+
+  if (ip.startsWith("::ffff:")) {
+    return ip.slice(7);  // Strip ::ffff: prefix
+  }
+
+  return ip;
+}
+```
+
+### GeoIP in open recorder
+
+Geo data is resolved during open event recording:
+
+```typescript
+// server/src/services/openRecorder.ts:142-159
+const geo = resolveGeoFromIp(input.ipAddress);
+
+insertOpenEventStmt.run(
+  input.payload.email_id,
+  input.payload.user_id,
+  input.payload.recipient,
+  input.openedAtIso,
+  input.ipAddress,
+  input.userAgent,
+  geo.geo_country,
+  geo.geo_region,
+  geo.geo_city,
+  geo.latitude,
+  geo.longitude,
+  isDuplicate ? 1 : 0,
+  isSenderSuppressed ? 1 : 0,
+  suppressionReason
+);
+```
+
+<Warning>
+  GeoIP resolution is **approximate** and may be inaccurate for:
+  - VPN/proxy users
+  - Mobile networks
+  - Corporate networks with centralized egress
+  - Gmail Image Proxy (shows Google's proxy server location, not recipient's)
+</Warning>
+
+## Inbox badge system
+
+The Chrome extension displays open count badges in your Gmail inbox.
+
+### Badge rendering
+
+Badges are injected into Gmail's inbox row UI:
+
+```javascript
+// extension/src/content/gmailCompose.js:436-516
+function renderInboxBadges() {
+  if (isRenderingBadges) {
+    return;
+  }
+
+  if (Date.now() - lastInboxRefreshAt > BADGE_REFRESH_MS * 2) {
+    return;
+  }
+
+  const rows = Array.from(document.querySelectorAll("tr.zA")).slice(0, MAX_ROWS_TO_RENDER);
+
+  isRenderingBadges = true;
+
+  try {
+    rows.forEach((row) => {
+      const matched = findTrackedItemForRow(row);
+      const slot = findBadgeSlot(row);
+      if (!slot) {
+        return;
+      }
+
+      slot.classList.add("et-opens-slot");
+
+      let badge = slot.querySelector(".et-opens-badge");
+      if (!badge) {
+        badge = document.createElement("button");
+        badge.type = "button";
+        badge.className = "et-opens-badge";
+        slot.appendChild(badge);
+      }
+
+      let isDisabled = false;
+      let clickHandler = () => {
+        window.open("https://email-tracker.duckdns.org/dashboard", "_blank", "noopener,noreferrer");
+      };
+      let title = "Open dashboard";
+
+      if (matched) {
+        const opens = Number(matched.totalOpenEvents || 0);
+        title = `Opens: ${opens}`;
+        clickHandler = () => {
+          const dashboardUrl = `${matched.baseUrl || "https://email-tracker.duckdns.org"}/dashboard?tab=opens&email_id=${encodeURIComponent(
+            matched.emailId
+          )}`;
+          window.open(dashboardUrl, "_blank", "noopener,noreferrer");
+        };
+      }
+
+      // Update badge state
+      const stateKey = `${isDisabled ? "1" : "0"}|${matched?.emailId || "none"}|${title}`;
+      if (badge.dataset.stateKey !== stateKey) {
+        badge.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17h18v2H3v-2zm2-2l4-5 4 3 5-7 2 1.4-6.2 8.6-4.1-3.1L6.6 16.8 5 15z"/></svg>';
+        badge.classList.toggle("et-disabled", isDisabled);
+        badge.title = title;
+        badge.setAttribute("aria-label", title);
+        badge.dataset.stateKey = stateKey;
+      }
+
+      badge.disabled = false;
+      badge.onclick = (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        if (clickHandler) {
+          clickHandler();
+        }
+      };
+    });
+  } finally {
+    isRenderingBadges = false;
+  }
+}
+```
+
+### Badge refresh interval
+
+Badges refresh every 10 seconds:
+
+```javascript
+// extension/src/content/gmailCompose.js:2, 25
+const BADGE_REFRESH_MS = 10_000;
+setInterval(refreshInboxBadgeData, BADGE_REFRESH_MS);
+```
+
+### Badge data fetching
+
+The extension fetches badge data from the dashboard API:
+
+```javascript
+// extension/src/content/gmailCompose.js:418-434
+async function refreshInboxBadgeData() {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "tracker:getInboxBadgeData"
+    });
+
+    if (!response?.ok || !Array.isArray(response.items)) {
+      return;
+    }
+
+    inboxBadgeItems = response.items;
+    lastInboxRefreshAt = Date.now();
+    renderInboxBadges();
+  } catch {
+    // no-op
+  }
+}
+```
+
+### Badge enrichment in background worker
+
+```javascript
+// extension/src/background/serviceWorker.js:174-225
+async function enrichRecentEmails(recentEmails, trackerBaseUrl, dashboardToken) {
+  const normalizedBaseUrl = normalizeBaseUrl(trackerBaseUrl || DEFAULT_TRACKER_BASE_URL);
+
+  if (!dashboardToken) {
+    return recentEmails.map((item) => ({
+      ...item,
+      totalOpenEvents: 0,
+      uniqueOpenCount: 0,
+      lastOpenedAt: null
+    }));
+  }
+
+  try {
+    const response = await fetch(`${normalizedBaseUrl}/dashboard/api/emails`, {
+      headers: {
+        "X-Tracker-Token": dashboardToken
+      }
+    });
+
+    if (!response.ok) {
+      return recentEmails.map((item) => ({
+        ...item,
+        totalOpenEvents: 0,
+        uniqueOpenCount: 0,
+        lastOpenedAt: null
+      }));
+    }
+
+    const payload = await response.json();
+    const serverItems = Array.isArray(payload?.items) ? payload.items : [];
+    const byEmailId = new Map(serverItems.map((item) => [item.email_id, item]));
+
+    return recentEmails.map((item) => {
+      const matched = byEmailId.get(item.emailId);
+      return {
+        ...item,
+        recipient: matched?.recipient || item.recipient || "unknown",
+        senderEmail: matched?.sender_email || item.senderEmail || "",
+        totalOpenEvents: matched?.total_open_events ?? 0,
+        uniqueOpenCount: matched?.unique_open_count ?? 0,
+        lastOpenedAt: matched?.last_opened_at ?? null
+      };
+    });
+  } catch {
+    return recentEmails.map((item) => ({
+      ...item,
+      totalOpenEvents: 0,
+      uniqueOpenCount: 0,
+      lastOpenedAt: null
+    }));
+  }
+}
+```
+
+<Note>
+  Badge rendering is throttled to 120 rows (`MAX_ROWS_TO_RENDER`) to avoid performance issues with large inboxes.
+</Note>
+
+## Dashboard HTML
+
+The dashboard serves a static HTML file:
+
+```typescript
+// server/src/routes/dashboard.ts:95-98
+dashboardRouter.get("/dashboard", (_req, res) => {
+  const dashboardFilePath = resolveDashboardFilePath();
+  res.sendFile(dashboardFilePath);
+});
+```
+
+The HTML file is located at:
+- `server/src/public/dashboard.html` (source)
+- `server/dist/public/dashboard.html` (build output)
+
+## Database schema
+
+### tracked_emails table
+
+```sql
+-- server/src/db/schema.sql:3-11
+CREATE TABLE IF NOT EXISTS tracked_emails (
+  email_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  sender_email TEXT,
+  sent_at TEXT NOT NULL,
+  open_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+### open_events table
+
+```sql
+-- server/src/db/schema.sql:13-31
+CREATE TABLE IF NOT EXISTS open_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+  ip_address TEXT,
+  user_agent TEXT,
+  geo_country TEXT,
+  geo_region TEXT,
+  geo_city TEXT,
+  latitude REAL,
+  longitude REAL,
+  device_type TEXT NOT NULL DEFAULT 'other' CHECK (device_type IN ('phone', 'computer', 'other')),
+  is_duplicate INTEGER NOT NULL DEFAULT 0 CHECK (is_duplicate IN (0, 1)),
+  is_sender_suppressed INTEGER NOT NULL DEFAULT 0 CHECK (is_sender_suppressed IN (0, 1)),
+  suppression_reason TEXT,
+  FOREIGN KEY (email_id) REFERENCES tracked_emails(email_id)
+);
+```
+
+### Indexes
+
+```sql
+-- server/src/db/schema.sql:33-36
+CREATE INDEX IF NOT EXISTS idx_tracked_emails_user_id ON tracked_emails(user_id);
+CREATE INDEX IF NOT EXISTS idx_open_events_email_id_opened_at ON open_events(email_id, opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_open_events_dedupe_lookup ON open_events(email_id, ip_address, user_agent, opened_at DESC);
+```
+
+## API usage examples
+
+### Fetch all tracked emails
+
+```bash
+curl -H "X-Tracker-Token: your-token" \
+  http://localhost:8090/dashboard/api/emails
+```
+
+### Fetch opens for specific email
+
+```bash
+curl -H "X-Tracker-Token: your-token" \
+  "http://localhost:8090/dashboard/api/open-events?email_id=abc-123"
+```
+
+### Fetch recent emails in extension
+
+```javascript
+const response = await chrome.runtime.sendMessage({
+  type: "tracker:getInboxBadgeData"
+});
+
+if (response?.ok) {
+  console.log("Badge items:", response.items);
+}
+```
+
+## Frequently asked questions
+
+<AccordionGroup>
+  <Accordion title="How accurate is GeoIP data?">
+    GeoIP is **approximate** and based on IP address databases. Accuracy varies:
+    - **Country:** ~95% accurate
+    - **Region/State:** ~80% accurate
+    - **City:** ~60% accurate
+    - **Coordinates:** Within 25-50 miles
+    
+    Factors that reduce accuracy:
+    - VPNs, proxies, Tor
+    - Gmail Image Proxy (shows Google's location, not recipient's)
+    - Mobile networks (may show carrier's data center)
+    - Corporate networks (may show headquarters, not actual location)
+  </Accordion>
+  
+  <Accordion title="Why is unique_open_count different from total_open_events?">
+    These should be **identical** in most cases. Differences may indicate:
+    - Race conditions during concurrent opens
+    - Database transaction issues
+    - Manual database edits
+    
+    `unique_open_count` is authoritative (from `tracked_emails.open_count`). `total_open_events` is calculated from `open_events` table.
+  </Accordion>
+  
+  <Accordion title="Can I customize the dashboard HTML?">
+    Yes. The dashboard HTML is served from:
+    - `server/src/public/dashboard.html` (edit this file)
+    - Rebuild with `npm --workspace=server run build`
+    - Restart server
+    
+    You can add custom JavaScript, CSS, or integrate with other analytics tools.
+  </Accordion>
+  
+  <Accordion title="How do I export analytics to CSV/JSON?">
+    Use the dashboard APIs:
+    
+    ```bash
+    # Export all emails to JSON
+    curl -H "X-Tracker-Token: your-token" \
+      http://localhost:8090/dashboard/api/emails > emails.json
+    
+    # Export all opens to JSON
+    curl -H "X-Tracker-Token: your-token" \
+      http://localhost:8090/dashboard/api/open-events > opens.json
+    ```
+    
+    Convert to CSV using `jq`:
+    
+    ```bash
+    jq -r '.items[] | [.email_id, .recipient, .unique_open_count] | @csv' emails.json > emails.csv
+    ```
+  </Accordion>
+  
+  <Accordion title="Why are raw_open_events higher than total_open_events?">
+    `raw_open_events` includes **all** pixel hits, including:
+    - Duplicates (caught by deduplication)
+    - Sender self-opens (caught by suppression)
+    - Multiple prefetch/preview requests
+    
+    `total_open_events` only counts **legitimate** opens (non-duplicate, non-suppressed).
+  </Accordion>
+</AccordionGroup>
+
+## Related features
+
+<CardGroup cols={2}>
+  <Card title="Email tracking" icon="envelope" href="/features/email-tracking">
+    Learn how pixel tracking works end-to-end
+  </Card>
+  
+  <Card title="Sender suppression" icon="user-slash" href="/features/sender-suppression">
+    Understand identity-based suppression
+  </Card>
+  
+  <Card title="Deduplication" icon="filter" href="/features/deduplication">
+    Learn how duplicate opens are detected
+  </Card>
+</CardGroup>

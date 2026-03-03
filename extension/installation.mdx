@@ -1,0 +1,98 @@
+---
+title: Install the extension
+description: Load the unpacked Chrome extension in developer mode
+---
+
+The Email Tracker extension is a Chrome Manifest V3 extension that injects tracking pixels into Gmail messages and displays open analytics in the Gmail interface.
+
+## Prerequisites
+
+Before installing the extension, ensure you have:
+
+- Chrome browser (version 88 or later)
+- Built extension files (see [Installation](/installation) for build instructions)
+- Tracker server running and accessible
+
+## Installation steps
+
+<Steps>
+  <Step title="Open Chrome extensions page">
+    Navigate to `chrome://extensions` in your Chrome browser. You can either:
+    - Type `chrome://extensions` directly in the address bar, or
+    - Click the three-dot menu → More Tools → Extensions
+  </Step>
+
+  <Step title="Enable developer mode">
+    Toggle the **Developer mode** switch in the top-right corner of the extensions page. This reveals additional options for loading unpacked extensions.
+  </Step>
+
+  <Step title="Load the extension">
+    Click the **Load unpacked** button that appears in the top-left corner after enabling developer mode.
+
+    In the file picker dialog, navigate to your email tracker repository and select the `extension/` directory.
+
+    The extension directory contains:
+    - `manifest.json` - Extension configuration
+    - `src/` - Extension source code
+      - `background/serviceWorker.js` - Background service worker
+      - `content/gmailCompose.js` - Gmail content script
+      - `popup/` - Extension popup UI
+  </Step>
+
+  <Step title="Verify installation">
+    After loading, you should see the **Gmail Email Tracker** extension card appear in your extensions list with:
+    - Extension name: "Gmail Email Tracker"
+    - Version: "0.1.0"
+    - Status: Enabled (toggle should be blue)
+
+    The extension icon should also appear in your Chrome toolbar.
+  </Step>
+</Steps>
+
+<Tip>
+Pin the extension to your toolbar for quick access by clicking the puzzle piece icon in Chrome's toolbar and selecting the pin icon next to "Gmail Email Tracker".
+</Tip>
+
+## Permissions explained
+
+The extension requests the following permissions in `extension/manifest.json:6-7`:
+
+- **storage**: Stores user ID, tracker configuration, and recent email metadata
+- **host_permissions**:
+  - `https://mail.google.com/*` - Access Gmail to inject tracking pixels and display badges
+  - `http://*/*` and `https://*/*` - Communicate with your self-hosted tracker server
+
+## Updating the extension
+
+When you make changes to the extension code:
+
+1. Navigate to `chrome://extensions`
+2. Find the Gmail Email Tracker extension card
+3. Click the circular **Reload** icon
+
+Chrome will reload the extension with your latest changes.
+
+<Tip>
+If you modify the `manifest.json` file, you may need to remove and re-add the extension instead of just reloading it.
+</Tip>
+
+## Troubleshooting
+
+### Extension doesn't appear after loading
+
+- Verify you selected the correct `extension/` directory containing `manifest.json`
+- Check the Chrome extensions page for error messages under the extension card
+- Ensure all required files are present in the `extension/` directory
+
+### Permission warnings
+
+Chrome may display warnings about the extension's broad host permissions. This is expected since the extension needs to:
+- Access Gmail to inject pixels
+- Connect to your self-hosted tracker server (which can be any HTTP/HTTPS URL)
+
+## Next steps
+
+After installing the extension:
+
+1. [Configure the extension](/extension/configuration) with your tracker base URL and dashboard token
+2. [Start using the extension](/extension/usage) to track emails in Gmail

@@ -1,0 +1,143 @@
+---
+title: Tracking pixel
+description: Record email opens using the tracking pixel endpoint
+---
+
+The tracking pixel endpoint records when an email is opened by serving a 1x1 transparent GIF image.
+
+## Endpoint
+
+```
+GET /t/:token.gif
+```
+
+This endpoint is automatically called when the tracking pixel image is loaded in the recipient's email client.
+
+## How it works
+
+When an email containing the tracking pixel is opened:
+
+1. The email client requests the image from `https://your-server.com/t/{token}.gif`
+2. The server decodes the tracking token to extract email metadata
+3. The server checks for sender suppression signals (for Gmail proxy handling)
+4. The server records the open event in the database
+5. The server returns a 1x1 transparent GIF image
+
+## Parameters
+
+<ParamField path="token" type="string" required>
+  Encoded tracking token containing email metadata. Generated using `encodeTrackingToken()` from `@email-tracker/shared`.
+
+  The token includes:
+  - `email_id` - Unique identifier for the email
+  - `user_id` - User who sent the email
+  - `recipient` - Recipient email address
+  - `sender_email` - Sender email address
+  - `sent_at` - ISO timestamp when email was sent
+</ParamField>
+
+## Request headers
+
+The server automatically captures the following headers from the request:
+
+- `User-Agent` - Used to detect device type and Gmail proxy requests
+- `X-Forwarded-For` - Used to determine the client's IP address (when behind a proxy)
+
+## Response
+
+The endpoint always returns a 200 status code with a 1x1 transparent GIF image, regardless of whether the token is valid.
+
+### Response headers
+
+```http
+Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+Pragma: no-cache
+Expires: 0
+Content-Type: image/gif
+Content-Length: 43
+```
+
+These headers prevent email clients from caching the image, ensuring each open is tracked.
+
+### Response body
+
+Base64-encoded 1x1 transparent GIF:
+
+```
+R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==
+```
+
+## Example usage
+
+### Generate tracking pixel URL
+
+```typescript
+import { encodeTrackingToken } from "@email-tracker/shared";
+
+const token = encodeTrackingToken({
+  email_id: "email_123",
+  user_id: "user_456",
+  recipient: "recipient@example.com",
+  sender_email: "sender@example.com",
+  sent_at: new Date().toISOString()
+});
+
+const pixelUrl = `https://tracker.yourdomain.com/t/${token}.gif`;
+```
+
+### Embed in email HTML
+
+```html
+<img src="https://tracker.yourdomain.com/t/{token}.gif" 
+     width="1" 
+     height="1" 
+     alt="" 
+     style="display:block" />
+```
+
+### Example request
+
+```bash
+curl -v "http://localhost:8080/t/eyJlbWFpbF9pZCI6ImVtYWlsXzEyMyJ9.gif"
+```
+
+## Deduplication
+
+The server implements automatic deduplication to avoid counting multiple opens from the same email client:
+
+- Default deduplication window: 30 seconds
+- Configurable via `DEDUP_WINDOW_MS` environment variable
+- Duplicate opens are recorded but flagged with `is_duplicate: true`
+
+## Gmail proxy handling
+
+The server automatically detects requests from Gmail's image proxy:
+
+- User-Agent contains `googleimageproxy`
+- IP address matches known Google proxy ranges:
+  - `66.249.*`
+  - `64.233.*`
+  - `74.125.*`
+
+When Gmail proxy is detected:
+- The event is logged with `google_proxy_hit` in debug metrics
+- If a suppression signal exists, the latency is measured and recorded
+- The open may be suppressed based on sender suppression signals
+
+See [Suppression](/api/suppression) for details on controlling Gmail proxy behavior.
+
+## Server logs
+
+Each pixel hit generates a structured log entry:
+
+```json
+{
+  "event": "pixel-hit",
+  "email_id": "email_123",
+  "duplicate": 0,
+  "sender_suppressed": 0,
+  "counted": 1,
+  "unique_open_count": 1,
+  "ip": "192.168.1.1"
+}
+```

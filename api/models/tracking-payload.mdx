@@ -1,0 +1,59 @@
+---
+title: TrackingPayload
+description: Data structure for encoding tracking information into tracking tokens
+---
+
+The `TrackingPayload` interface defines the data structure used to create tracking tokens. This payload is encoded into the tracking pixel URL and decoded when the pixel is accessed.
+
+## Fields
+
+<ParamField path="user_id" type="string" required>
+  Unique identifier for the user or account that owns this tracking pixel. Used for data isolation and filtering.
+</ParamField>
+
+<ParamField path="email_id" type="string" required>
+  Unique identifier for the specific email being tracked. This should be a unique value for each email sent.
+</ParamField>
+
+<ParamField path="recipient" type="string" required>
+  Email address of the recipient. Used to associate open events with specific recipients.
+</ParamField>
+
+<ParamField path="sender_email" type="string">
+  Email address of the sender. Optional field that can be used to identify which sender account was used.
+</ParamField>
+
+<ParamField path="sent_at" type="string" required>
+  ISO 8601 timestamp indicating when the email was sent. Format: `YYYY-MM-DDTHH:mm:ss.sssZ`
+</ParamField>
+
+## Usage
+
+This interface is used when:
+- Creating tracking tokens with `encodeTrackingToken()` function
+- Generating tracking pixel URLs for emails
+- Decoding tracking tokens in the tracking endpoint
+
+## Related APIs
+
+- [Tracking pixel endpoint](/api/tracking-pixel) - Decodes `TrackingPayload` from tracking tokens
+- [Mark suppress next](/api/suppression) - Uses `email_id` from the payload for suppression
+
+## Example
+
+```typescript
+const payload: TrackingPayload = {
+  user_id: "user_123",
+  email_id: "email_456",
+  recipient: "recipient@example.com",
+  sender_email: "sender@example.com",
+  sent_at: "2024-01-15T10:30:00.000Z"
+};
+
+const token = encodeTrackingToken(payload);
+const trackingUrl = `https://your-server.com/track/t/${token}.gif`;
+```
+
+## Database mapping
+
+When a tracking pixel is accessed, the `TrackingPayload` data is stored in the `tracked_emails` table and used to create records in the `open_events` table.

@@ -1,0 +1,581 @@
+---
+title: Sender suppression
+description: Understand the identity-based, event-driven suppression model that prevents counting sender self-opens
+---
+
+## Why suppression matters
+
+When you send a tracked email and then open it yourself (e.g., in your Sent folder), the tracking pixel fires just like it would for a recipient. Without suppression, your own opens would inflate the open count.
+
+**Email Tracker uses identity-based, event-driven suppression** to reliably distinguish sender opens from genuine recipient opens.
+
+## How it works
+
+The suppression system uses a two-phase approach:
+
+1. **Detection phase** - Content script scans visible emails for tracking pixels and identifies sender-owned messages
+2. **Suppression phase** - Server receives suppression signal and marks the next pixel hit as sender-suppressed
+
+<Frame>
+  <img src="https://github.com/user-attachments/assets/da6341de-5e0e-41f3-821a-d4587bc9818a" alt="Sender suppression flow diagram" />
+</Frame>
+
+## Detection phase
+
+The Gmail content script continuously scans for tracking pixels in visible messages.
+
+### Scanning for tracking pixels
+
+```javascript
+// extension/src/content/gmailCompose.js:519-570
+function scanAndMarkSuppressNext() {
+  if (!isRuntimeAvailable()) {
+    return;
+  }
+
+  if (!isConversationViewRendered()) {
+    return;
+  }
+
+  const currentEmail = getCurrentLoggedInEmail();
+  if (!isLikelyEmail(currentEmail)) {
+    return;
+  }
+
+  const images = document.querySelectorAll("img[src]");
+  images.forEach((imgNode) => {
+    const src = imgNode.getAttribute("src") || imgNode.src || "";
+    const token = extractTokenFromTrackingSrc(src);
+    if (!token) {
+      return;
+    }
+
+    const payload = decodeTrackingPayloadFromToken(token);
+    if (!payload?.emailId || !payload?.senderEmail) {
+      return;
+    }
+
+    if (processedSuppressEmailIds.has(payload.emailId)) {
+      return;
+    }
+
+    // Identity-based suppression: sender viewing own tracked message
+    if (normalizeEmailCandidate(payload.senderEmail) !== normalizeEmailCandidate(currentEmail)) {
+      return;
+    }
+
+    processedSuppressEmailIds.add(payload.emailId);
+    chrome.runtime.sendMessage({
+      type: "tracker:markSuppressNext",
+      emailId: payload.emailId
+    });
+  });
+}
+```
+
+### Identity comparison
+
+The key to reliable suppression is comparing the **sender email in the token** with the **currently logged-in Gmail account**:
+
+```javascript
+// extension/src/content/gmailCompose.js:554-558
+// Identity-based suppression: sender viewing own tracked message should suppress next open.
+// Folder names are unreliable in Gmail SPA; account identity is stable for this decision.
+if (normalizeEmailCandidate(payload.senderEmail) !== normalizeEmailCandidate(currentEmail)) {
+  return;
+}
+```
+
+<Note>
+  This approach is **more reliable than folder-based detection** (e.g., checking if you're in "Sent" folder) because Gmail's SPA architecture makes folder inference brittle. Account identity is stable and unambiguous.
+</Note>
+
+### Token decoding in extension
+
+The content script decodes tracking tokens client-side to extract sender email:
+
+```javascript
+// extension/src/content/gmailCompose.js:674-705
+function decodeTrackingPayloadFromToken(token) {
+  const raw = String(token || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const normalized = raw.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const json = new TextDecoder().decode(bytes);
+    const parsed = JSON.parse(json);
+
+    if (Array.isArray(parsed)) {
+      const emailId = String(parsed[1] || "").trim().toLowerCase();
+      const senderEmail = normalizeEmailCandidate(parsed[4] || "");
+      return emailId ? { emailId, senderEmail } : null;
+    }
+
+    if (parsed && typeof parsed === "object") {
+      const emailId = String(parsed.email_id || "").trim().toLowerCase();
+      const senderEmail = normalizeEmailCandidate(parsed.sender_email || "");
+      return emailId ? { emailId, senderEmail } : null;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+```
+
+## Suppression phase
+
+Once the content script detects a sender-owned message, it signals the server to suppress the next pixel hit for that `email_id`.
+
+### Suppression signal endpoint
+
+The background worker sends a `POST /mark-suppress-next` request:
+
+```javascript
+// extension/src/background/serviceWorker.js:324-350
+async function markSuppressNextForEmail(emailId) {
+  if (!emailId) {
+    return { sent: false, reason: "missing email id" };
+  }
+
+  const normalizedBaseUrl = await getTrackerBaseUrl();
+
+  try {
+    const response = await fetch(`${normalizedBaseUrl}/mark-suppress-next`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ email_id: emailId }),
+      cache: "no-store",
+      credentials: "omit"
+    });
+
+    if (!response.ok) {
+      return { sent: false, reason: `http ${response.status}` };
+    }
+
+    return { sent: true, reason: "ok" };
+  } catch (error) {
+    return { sent: false, reason: String(error?.message || error) };
+  }
+}
+```
+
+### Server-side suppression map
+
+The server maintains an in-memory map of pending suppression signals:
+
+```typescript
+// server/src/routes/track.ts:13-32
+interface SuppressionEntry {
+  createdAtMs: number;
+}
+
+interface SuppressionDebugEvent {
+  event: "mark_suppress_next" | "google_proxy_hit" | "suppression_consumed" | "suppression_expired";
+  email_id: string;
+  at_ms: number;
+  ip: string;
+  user_agent: string;
+  delta_ms?: number;
+  pending_suppression?: boolean;
+}
+
+// Event-based, email-scoped suppression store with consume-once semantics.
+// TTL exists only as stale-entry cleanup fallback, not suppression logic.
+const suppressionMap = new Map<string, SuppressionEntry>();
+const latencySamples: number[] = [];
+const suppressionDebugEvents: SuppressionDebugEvent[] = [];
+let suppressSignalCount = 0;
+```
+
+### Marking an email for suppression
+
+When the server receives a suppression signal, it stores a timestamp:
+
+```typescript
+// server/src/routes/track.ts:36-91
+trackRouter.post("/mark-suppress-next", (req, res) => {
+  const nowMs = Date.now();
+  cleanupExpiredSuppressions(nowMs);
+
+  const signal = markSuppressNext(req.body?.email_id, req, nowMs);
+  if (!signal.ok) {
+    res.status(400).json({ ok: false, error: "email_id is required" });
+    return;
+  }
+
+  res.json({ ok: true, email_id: signal.emailId, recorded_at_ms: signal.recordedAtMs });
+});
+
+function markSuppressNext(
+  rawEmailId: unknown,
+  req: { /* ... */ },
+  nowMs: number
+): { ok: true; emailId: string; recordedAtMs: number } | { ok: false } {
+  const emailId = String(rawEmailId || "").trim();
+  if (!emailId) {
+    return { ok: false };
+  }
+
+  suppressionMap.set(emailId, { createdAtMs: nowMs });
+  enforceSuppressionMapLimit();
+
+  suppressSignalCount += 1;
+  pushSuppressionDebugEvent({
+    event: "mark_suppress_next",
+    email_id: emailId,
+    at_ms: nowMs,
+    ip: normalizeIp(getRequestIp(req)),
+    user_agent: String(req.get?.("user-agent") || "")
+  });
+
+  console.info(
+    JSON.stringify({
+      event: "suppress_signal_received",
+      endpoint: req.path,
+      email_id: emailId,
+      at_ms: nowMs,
+      map_size: suppressionMap.size
+    })
+  );
+
+  return { ok: true, emailId, recordedAtMs: nowMs };
+}
+```
+
+### Consuming suppression signal
+
+When the pixel endpoint receives a request, it checks for pending suppression:
+
+```typescript
+// server/src/routes/track.ts:93-160
+trackRouter.get("/t/:token.gif", (req, res) => {
+  const nowMs = Date.now();
+  const openedAtIso = new Date(nowMs).toISOString();
+  const token = req.params.token;
+
+  try {
+    const payload = decodeTrackingToken(token);
+    const ipAddress = getRequestIp(req);
+    const userAgent = req.get("user-agent") || null;
+    const emailId = payload.email_id;
+
+    cleanupExpiredSuppressions(nowMs);
+
+    const pendingSuppression = suppressionMap.get(emailId);
+    const wasSuppressedBySignal = Boolean(pendingSuppression);
+    const deltaMs = pendingSuppression ? Math.max(0, nowMs - pendingSuppression.createdAtMs) : null;
+
+    if (pendingSuppression) {
+      suppressionMap.delete(emailId);  // Consume once
+      pushSuppressionDebugEvent({
+        event: "suppression_consumed",
+        email_id: emailId,
+        at_ms: nowMs,
+        ip: normalizeIp(ipAddress),
+        user_agent: String(userAgent || ""),
+        delta_ms: deltaMs ?? undefined
+      });
+    }
+
+    const result = recordOpenEvent({
+      payload,
+      ipAddress,
+      userAgent,
+      openedAtIso,
+      forceSenderSuppressed: wasSuppressedBySignal,
+      suppressionReason: wasSuppressedBySignal ? "mark_suppress_next" : null
+    });
+
+    // ...
+  } catch (error) {
+    console.error("Tracking pixel processing failed:", error);
+  }
+
+  // Always return 200 + GIF
+  res.status(200).send(TRANSPARENT_PIXEL_GIF);
+});
+```
+
+<Warning>
+  Suppression signals are **consumed once** (line 111: `suppressionMap.delete(emailId)`). If the pixel fires again later (e.g., sender reopens the message), subsequent opens are not suppressed.
+</Warning>
+
+## Consume-once semantics
+
+The suppression system uses **consume-once** semantics:
+
+1. Content script sends suppression signal: `POST /mark-suppress-next`
+2. Server stores `{ email_id: timestamp }` in memory
+3. When pixel fires, server checks for pending suppression
+4. If found, server **deletes** the entry and marks event as suppressed
+5. Subsequent pixel hits for that `email_id` are not suppressed
+
+<Steps>
+  <Step title="Signal sent">
+    Sender opens message → Content script sends `POST /mark-suppress-next` → Server stores `suppressionMap.set(email_id, { createdAtMs })`
+  </Step>
+  
+  <Step title="Pixel fires">
+    Email client requests pixel → Server finds `email_id` in `suppressionMap` → Server deletes entry and marks event as suppressed
+  </Step>
+  
+  <Step title="Subsequent opens">
+    Sender or recipient opens again → No suppression entry exists → Open is counted normally
+  </Step>
+</Steps>
+
+## Suppression TTL
+
+Suppression entries have a 10-second TTL as a **cleanup fallback**, not as primary suppression logic:
+
+```typescript
+// server/src/routes/track.ts:6
+const SUPPRESSION_TTL_MS = 10_000;
+
+// server/src/routes/track.ts:283-298
+function cleanupExpiredSuppressions(nowMs: number): void {
+  for (const [emailId, entry] of suppressionMap.entries()) {
+    if (nowMs - entry.createdAtMs <= SUPPRESSION_TTL_MS) {
+      continue;
+    }
+
+    suppressionMap.delete(emailId);
+    pushSuppressionDebugEvent({
+      event: "suppression_expired",
+      email_id: emailId,
+      at_ms: nowMs,
+      ip: "",
+      user_agent: ""
+    });
+  }
+}
+```
+
+<Note>
+  The 10-second TTL exists to prevent memory leaks if pixel requests never arrive. It's **not** a "suppression window" — suppression is consumed immediately when the pixel fires.
+</Note>
+
+## Why this is reliable for Gmail
+
+The identity-based approach has key advantages over other suppression methods:
+
+<AccordionGroup>
+  <Accordion title="Avoids brittle folder/tab inference">
+    Gmail's SPA architecture makes it unreliable to detect whether you're viewing "Sent" vs "Inbox". URL paths and DOM structure change frequently.
+    
+    **Identity comparison is stable:** The logged-in account email is always available and unambiguous.
+  </Accordion>
+  
+  <Accordion title="Works across Gmail views">
+    Whether you open your message from:
+    - Sent folder
+    - Search results
+    - Conversation view
+    - Pop-out window
+    
+    The identity check (`sender_email === logged_in_email`) works consistently.
+  </Accordion>
+  
+  <Accordion title="Event-based, not time-based">
+    Some trackers use a "suppression window" where **all** opens within N seconds are suppressed. This can miss legitimate recipient opens.
+    
+    Email Tracker uses **explicit signal + consume-once**, so only the **first** pixel hit after the signal is suppressed.
+  </Accordion>
+  
+  <Accordion title="No false positives on shared inboxes">
+    If you send from a shared inbox (e.g., `team@company.com`) and a teammate opens the message while logged in as `teammate@company.com`, the open is **not** suppressed because `sender_email !== teammate@company.com`.
+  </Accordion>
+</AccordionGroup>
+
+## Gmail Image Proxy latency
+
+Gmail proxies images through Google's servers, introducing latency between the suppression signal and pixel hit. The tracker measures this latency for debugging.
+
+### Latency sampling
+
+```typescript
+// server/src/routes/track.ts:122-151
+const isGoogleProxyHit = isGoogleImageProxyHit(userAgent, ipAddress);
+if (isGoogleProxyHit) {
+  pushSuppressionDebugEvent({
+    event: "google_proxy_hit",
+    email_id: emailId,
+    at_ms: nowMs,
+    ip: normalizeIp(ipAddress),
+    user_agent: String(userAgent || ""),
+    pending_suppression: wasSuppressedBySignal,
+    delta_ms: deltaMs ?? undefined
+  });
+
+  if (wasSuppressedBySignal && typeof deltaMs === "number") {
+    latencySamples.push(deltaMs);
+    if (latencySamples.length > LATENCY_SAMPLE_LIMIT) {
+      latencySamples.splice(0, latencySamples.length - LATENCY_SAMPLE_LIMIT);
+    }
+
+    console.info(
+      JSON.stringify({
+        event: "gmail_proxy_latency_sample",
+        email_id: emailId,
+        delta_ms: deltaMs,
+        user_agent: userAgent || "",
+        ip: normalizeIp(ipAddress)
+      })
+    );
+  }
+}
+```
+
+### Latency metrics endpoint
+
+View Gmail proxy latency statistics:
+
+```bash
+curl http://localhost:8090/metrics/gmail-proxy-latency
+```
+
+Response:
+
+```json
+{
+  "count": 42,
+  "min": 245,
+  "max": 3821,
+  "avg": 1203.45,
+  "p50": 1150,
+  "p90": 2100,
+  "p95": 2450,
+  "p99": 3200
+}
+```
+
+## Debug endpoints
+
+The tracker provides debug endpoints to troubleshoot suppression:
+
+### Suppression signals
+
+```bash
+curl http://localhost:8090/metrics/suppress-signals
+```
+
+Returns:
+
+```json
+{
+  "count": 156,
+  "active_email_ids": 3,
+  "ttl_ms": 10000,
+  "recent": [
+    {
+      "event": "mark_suppress_next",
+      "email_id": "abc-123",
+      "at_ms": 1709845123456,
+      "ip": "192.168.1.1",
+      "user_agent": "Mozilla/5.0..."
+    }
+  ]
+}
+```
+
+### Suppression debug
+
+```bash
+curl http://localhost:8090/metrics/suppression-debug
+```
+
+Returns per-email breakdown:
+
+```json
+{
+  "active_email_ids": 3,
+  "ttl_ms": 10000,
+  "recent_events": [...],
+  "by_email": {
+    "abc-123": {
+      "marks": [1709845123456],
+      "google_proxy_hits": [1709845124789],
+      "consumed": [1709845124789],
+      "expired": []
+    }
+  }
+}
+```
+
+## Database flags
+
+Suppressed opens are stored in the database with flags:
+
+```sql
+-- server/src/db/schema.sql:28-29
+is_sender_suppressed INTEGER NOT NULL DEFAULT 0 CHECK (is_sender_suppressed IN (0, 1)),
+suppression_reason TEXT,
+```
+
+Suppressed events are stored for audit/debug but **do not increment** `tracked_emails.open_count`:
+
+```typescript
+// server/src/services/openRecorder.ts:161-163
+if (!isDuplicate && !isSenderSuppressed) {
+  incrementOpenCountStmt.run(input.payload.email_id);
+}
+```
+
+## Frequently asked questions
+
+<AccordionGroup>
+  <Accordion title="What if I open my message multiple times?">
+    Only the **first** pixel hit after the suppression signal is suppressed. Subsequent opens are counted normally (but may be caught by deduplication).
+  </Accordion>
+  
+  <Accordion title="What if the pixel fires before the suppression signal arrives?">
+    If the pixel request arrives before the `POST /mark-suppress-next` signal, the open is counted. This can happen if:
+    - Network latency is high
+    - Gmail's image proxy is very fast
+    - The extension content script is slow to scan
+    
+    In practice, the signal usually arrives first because it's sent immediately when the content script detects the pixel.
+  </Accordion>
+  
+  <Accordion title="Can I suppress opens for a specific recipient?">
+    No. Suppression is **sender-based** (not recipient-based). It only suppresses opens when the sender views their own message.
+    
+    To implement recipient-based suppression, you'd need to maintain a blocklist of recipient emails/IPs.
+  </Accordion>
+  
+  <Accordion title="Does suppression work if sender_email is missing from the token?">
+    No. If `sender_email` is not included in the tracking token, the content script cannot compare it with the logged-in account, so suppression does not trigger.
+    
+    Ensure your extension captures sender email during token generation:
+    
+    ```javascript
+    // extension/src/background/serviceWorker.js:26
+    const senderEmail = String(message.senderEmail || "").trim().toLowerCase() || null;
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Related features
+
+<CardGroup cols={2}>
+  <Card title="Email tracking" icon="envelope" href="/features/email-tracking">
+    Learn how pixel tracking works end-to-end
+  </Card>
+  
+  <Card title="Deduplication" icon="filter" href="/features/deduplication">
+    Understand how duplicate opens are detected
+  </Card>
+  
+  <Card title="Dashboard analytics" icon="chart-line" href="/features/dashboard-analytics">
+    Explore dashboard APIs and analytics features
+  </Card>
+</CardGroup>
