@@ -3,7 +3,17 @@ title: Dashboard endpoints
 description: Retrieve tracked emails and open events from the Email Tracker API
 ---
 
-The dashboard endpoints provide access to tracked email data and open events. All dashboard endpoints require authentication.
+The dashboard endpoints provide access to tracked email data and open events. The HTML dashboard is publicly accessible, while API endpoints require authentication.
+
+## Dashboard UI
+
+<Note>
+GET /dashboard serves the dashboard HTML interface. This endpoint does not require authentication. Access control should be handled at the reverse proxy level if needed.
+</Note>
+
+Access the dashboard in your browser at `http://localhost:8080/dashboard` (development) or `https://your-domain.com/dashboard` (production).
+
+The dashboard provides a web interface for viewing tracked emails and analytics without needing to make API calls directly.
 
 ## Authentication
 

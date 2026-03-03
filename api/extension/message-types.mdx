@@ -213,6 +213,137 @@ if (response?.ok && Array.isArray(response.items)) {
 }
 ```
 
+## tracker:getPopupData
+
+Retrieves comprehensive data for the extension popup UI, including recent emails, enriched tracking data, and debug information.
+
+### Request
+
+<ParamField path="type" type="string" required>
+  Must be `"tracker:getPopupData"`
+</ParamField>
+
+### Response
+
+<ParamField path="ok" type="boolean">
+  Indicates if the request was successful
+</ParamField>
+
+<ParamField path="userId" type="string">
+  Unique identifier for the user
+</ParamField>
+
+<ParamField path="trackerBaseUrl" type="string">
+  Base URL of the tracker server
+</ParamField>
+
+<ParamField path="dashboardToken" type="string">
+  Dashboard authentication token
+</ParamField>
+
+<ParamField path="recentEmails" type="array">
+  Array of recent tracked emails from local storage
+</ParamField>
+
+<ParamField path="enrichedRecentEmails" type="array">
+  Recent emails enriched with server-side tracking data
+</ParamField>
+
+<ParamField path="debugItems" type="array">
+  Debug information for troubleshooting
+</ParamField>
+
+<ParamField path="debugGeneratedAt" type="string">
+  ISO 8601 timestamp when the debug data was generated
+</ParamField>
+
+### Example
+
+```javascript
+const response = await chrome.runtime.sendMessage({
+  type: "tracker:getPopupData"
+});
+
+if (response?.ok) {
+  console.log(`User ID: ${response.userId}`);
+  console.log(`Recent emails: ${response.enrichedRecentEmails.length}`);
+}
+```
+
+## tracker:updateTrackerBaseUrl
+
+Updates the tracker server base URL in extension storage.
+
+### Request
+
+<ParamField path="type" type="string" required>
+  Must be `"tracker:updateTrackerBaseUrl"`
+</ParamField>
+
+<ParamField path="baseUrl" type="string" required>
+  New tracker base URL (e.g., `"http://localhost:8090"` or `"https://tracker.example.com"`)
+</ParamField>
+
+### Response
+
+<ParamField path="ok" type="boolean">
+  Indicates if the request was successful
+</ParamField>
+
+<ParamField path="trackerBaseUrl" type="string">
+  The normalized base URL that was saved
+</ParamField>
+
+### Example
+
+```javascript
+const response = await chrome.runtime.sendMessage({
+  type: "tracker:updateTrackerBaseUrl",
+  baseUrl: "https://tracker.example.com"
+});
+
+if (response?.ok) {
+  console.log(`Base URL updated to: ${response.trackerBaseUrl}`);
+}
+```
+
+## tracker:updateDashboardToken
+
+Updates the dashboard authentication token in extension storage.
+
+### Request
+
+<ParamField path="type" type="string" required>
+  Must be `"tracker:updateDashboardToken"`
+</ParamField>
+
+<ParamField path="dashboardToken" type="string" required>
+  Dashboard authentication token
+</ParamField>
+
+### Response
+
+<ParamField path="ok" type="boolean">
+  Indicates if the request was successful
+</ParamField>
+
+<ParamField path="dashboardToken" type="string">
+  The token that was saved
+</ParamField>
+
+### Example
+
+```javascript
+const response = await chrome.runtime.sendMessage({
+  type: "tracker:updateDashboardToken",
+  dashboardToken: "your-secret-token"
+});
+
+if (response?.ok) {
+  console.log("Dashboard token updated successfully");
+}
+```
+
 ## tracker:markSuppressNext
 
 Marks an email to suppress the next open event. This is used when the sender views their own sent email to avoid tracking themselves.
