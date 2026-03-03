@@ -1,0 +1,105 @@
+{
+  "projectType": "saas",
+  "projectName": "Email Tracker",
+  "projectDescription": "Self-hosted Gmail pixel tracking with Chrome extension, Node.js server, and real-time analytics dashboard.",
+  "theme": "palm",
+  "primaryColor": "#2563eb",
+  "lightColor": "#60a5fa",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "introduction",
+              "how-it-works"
+            ]
+          },
+          {
+            "group": "Getting Started",
+            "pages": [
+              "quickstart",
+              "installation",
+              "configuration"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/email-tracking",
+              "features/sender-suppression",
+              "features/dashboard-analytics",
+              "features/deduplication"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/self-hosting",
+              "deployment/production-setup",
+              "deployment/reverse-proxy"
+            ]
+          },
+          {
+            "group": "Extension",
+            "pages": [
+              "extension/installation",
+              "extension/configuration",
+              "extension/usage"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Server API",
+            "pages": [
+              "api/overview",
+              "api/tracking-pixel",
+              "api/dashboard-endpoints",
+              "api/suppression"
+            ]
+          },
+          {
+            "group": "Extension API",
+            "pages": [
+              "api/extension/message-types",
+              "api/extension/storage"
+            ]
+          },
+          {
+            "group": "Data Models",
+            "pages": [
+              "api/models/tracking-payload",
+              "api/models/tracked-email",
+              "api/models/open-event"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Gmail pixel tracking via Chrome extension",
+    "Real-time email open tracking with deduplication",
+    "Identity-based sender suppression to prevent self-open counting",
+    "Analytics dashboard with GeoIP enrichment",
+    "Self-hosted deployment with SQLite storage",
+    "Production-ready HTTPS setup with reverse proxy configs"
+  ],
+  "publicApiSurface": [
+    "GET /t/:token.gif - Tracking pixel endpoint",
+    "POST /mark-suppress-next - Sender suppression signal",
+    "GET /dashboard/api/emails - Tracked emails list",
+    "GET /dashboard/api/open-events - Open events history",
+    "GET /metrics/gmail-proxy-latency - Gmail proxy latency stats",
+    "GET /metrics/suppress-signals - Suppression signals metrics",
+    "GET /metrics/suppression-debug - Suppression debug data",
+    "GET /health - Health check endpoint"
+  ]
+}
